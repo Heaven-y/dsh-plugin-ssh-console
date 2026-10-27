@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="SSH console">
+  <defs>
+    <linearGradient id="sscTile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b3a5c"/>
+      <stop offset="1" stop-color="#0d1f33"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="30" height="30" rx="8" fill="url(#sscTile)"/>
+  <rect x="1.5" y="1.5" width="29" height="29" rx="7.5" fill="none" stroke="#3f7fb8" stroke-opacity="0.55"/>
+  <rect x="5.5" y="7.5" width="21" height="12.5" rx="3" fill="none" stroke="#7fd4ff" stroke-width="1.4"/>
+  <path d="M9 11.2l2.6 2.2-2.6 2.2" fill="none" stroke="#7fd4ff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M14.2 15.6h5.2" fill="none" stroke="#7fd4ff" stroke-width="1.4" stroke-linecap="round"/>
+  <rect x="7.5" y="22.5" width="17" height="4.2" rx="2.1" fill="#12324f"/>
+  <circle cx="11" cy="24.6" r="1.05" fill="#55e0a0"/>
+  <circle cx="14.6" cy="24.6" r="1.05" fill="#ffd166"/>
+  <circle cx="18.2" cy="24.6" r="1.05" fill="#7fd4ff"/>
+  <rect x="21.2" y="23.5" width="2.4" height="2.2" rx="0.7" fill="#3f7fb8"/>
+</svg>

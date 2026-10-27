@@ -1,0 +1,67 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Nothing here talks to a registry or writes to the repository, so the default
+# read-only token is all it needs.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The plugin is pure JavaScript with no platform branch, so the point of
+        # the matrix is to keep it that way rather than to cover real differences.
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # `ssh2` pulls one optional native dependency (cpu-features) that only
+      # speeds up cipher selection; the pure-JavaScript path is what ships, so
+      # there is no reason to make every job compile it.
+      - name: Install
+        run: npm ci --omit=optional
+
+      - name: Host tests
+        run: node test/host.test.mjs
+
+      - name: Client tests
+        run: node test/client.test.mjs
+
+      - name: Pane tests
+        run: node test/panes.test.mjs
+
+  # The vendored renderer is committed, because the package works without a build
+  # step. That only stays true if the committed copy is the one the script
+  # produces, so this job rebuilds it and fails on any difference.
+  chunk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Rebuild the vendored renderer
+        run: npm run build
+
+      - name: The committed chunk is current
+        run: git diff --exit-code -- client.xterm.js

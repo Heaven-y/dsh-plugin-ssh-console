@@ -1,0 +1,6 @@
+* text=auto eol=lf
+
+# The vendored renderer is a generated 487 KiB one-liner. Recording it as binary
+# keeps git from ever normalising its line endings, which is what the CI check
+# that compares it against a fresh build depends on.
+client.xterm.js -text

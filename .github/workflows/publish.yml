@@ -1,0 +1,64 @@
+name: Publish
+
+# A tag push is the release: one released version is one tag, and nothing else
+# publishes. `workflow_dispatch` exists for re-running a failed publish of the
+# tag that is already out, without cutting a new version.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  # OIDC: this is what lets npm verify the workflow instead of asking for a
+  # one-time password no runner can provide, and what records provenance.
+  id-token: write
+  # The release step writes to the repository.
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # Publishing a stale vendored renderer would ship a terminal that does not
+      # match the sources next to it, so the tag must carry a current build.
+      - name: The committed chunk is current
+        run: |
+          npm run build
+          git diff --exit-code -- client.xterm.js
+
+      - name: Test
+        run: npm test
+
+      # Auth resolution, in order:
+      #   1. `NPM_TOKEN` secret, when one is set — the first publish of a package
+      #      has to use a token, because npm cannot be told to trust this
+      #      workflow until the package exists.
+      #   2. OIDC trusted publishing, once the token secret is deleted and this
+      #      repository is configured as a trusted publisher on npmjs.com.
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::notice::No NPM_TOKEN secret set; publishing over OIDC trusted publishing."
+            npm config delete //registry.npmjs.org/:_authToken || true
+          fi
+          npm publish --access public --provenance
+
+      - name: Create the GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag

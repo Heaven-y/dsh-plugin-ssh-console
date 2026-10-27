@@ -1,0 +1,13 @@
+# Installed tooling only. `client.xterm.js` is a committed build output, so it is
+# deliberately absent from this list: the package ships it and must stay diffable.
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+
+# The profile links this checkout with pnpm, which would rewrite this file on
+# every install. npm's `package-lock.json` is the lockfile CI installs from.
+pnpm-lock.yaml
+
+# Scratch files from local probing.
+.probe-*/

@@ -1,0 +1,15 @@
+# SSH Console (bundle layer)
+#
+# One row: the Host half that owns the SSH connection and publishes the
+# `sshConsole` Remote namespace the Client half calls.
+#
+# `config.servers` is optional. Targets are discovered from ~/.ssh/config first;
+# add entries here only for a host that is not declared there.
+- insert:
+    - id: ssh-console
+      name: '@coder02lq/dsh-plugin-ssh-console'
+      config:
+        refreshMs: 2000
+        execTimeoutMs: 60000
+        includeSshConfig: true
+        servers: []

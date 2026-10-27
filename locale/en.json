@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "SSH Console",
+    "description": "Connect to a remote server over SSH: browse its directories read-only, watch CPU/GPU like nvitop, and run shell commands."
+  }
+}

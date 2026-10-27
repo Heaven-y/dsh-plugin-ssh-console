@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "SSH 控制台",
+    "description": "通过 SSH 连接远程服务器：只读浏览目录、像 nvitop 一样查看 CPU/GPU，并直接运行终端命令。"
+  }
+}

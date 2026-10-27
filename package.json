@@ -1,0 +1,73 @@
+{
+  "name": "@coder02lq/dsh-plugin-ssh-console",
+  "version": "1.0.0",
+  "description": "Read-only SSH file browser, nvitop-style CPU/GPU monitor and a real multi-pane PTY terminal for DeepSeek Harness, as a dedicated main panel.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "ssh",
+    "ssh2",
+    "gpu",
+    "nvidia-smi",
+    "nvitop",
+    "terminal",
+    "pty",
+    "xterm"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./client.xterm.js": "./client.xterm.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "client.xterm.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Heaven-y/dsh-plugin-ssh-console.git"
+  },
+  "homepage": "https://github.com/Heaven-y/dsh-plugin-ssh-console#readme",
+  "bugs": {
+    "url": "https://github.com/Heaven-y/dsh-plugin-ssh-console/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build-xterm.mjs",
+    "test": "node test/host.test.mjs && node test/client.test.mjs && node test/panes.test.mjs",
+    "release": "node scripts/release.mjs"
+  },
+  "dependencies": {
+    "ssh2": "^1.17.0"
+  },
+  "devDependencies": {
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes"
+      ]
+    }
+  }
+}
