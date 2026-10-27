@@ -16,7 +16,7 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-const PKG_NAME = '@coder02lq/dsh-plugin-ssh-console'
+const PKG_NAME = 'dsh-plugin-ssh-console'
 const CHUNK = 'client.xterm.js'
 
 /**

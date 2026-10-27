@@ -1,4 +1,4 @@
-# @coder02lq/dsh-plugin-ssh-console
+# dsh-plugin-ssh-console
 
 **给 DeepSeek Harness 补一个「SSH 控制台」面板：连上远程服务器，只读看目录、像 nvitop 那样盯 CPU/GPU、并开一个真正的交互式终端。**
 
@@ -42,7 +42,7 @@
 
 ```yaml
 - id: ssh-console
-  name: '@coder02lq/dsh-plugin-ssh-console'
+  name: 'dsh-plugin-ssh-console'
   config:
     refreshMs: 2000
     execTimeoutMs: 60000
@@ -87,7 +87,7 @@
 **设置 → 插件 → 添加插件**，输入包名：
 
 ```
-@coder02lq/dsh-plugin-ssh-console
+dsh-plugin-ssh-console
 ```
 
 装完**完全退出 App 再打开**（Host 半与客户端 chunk 都变了，HMR 不重载插件 JS）。
@@ -97,7 +97,7 @@
 ### Web / CLI profile
 
 ```sh
-dsh plugin --profile <profile> add @coder02lq/dsh-plugin-ssh-console
+dsh plugin --profile <profile> add dsh-plugin-ssh-console
 ```
 
 也可以直接从 GitHub 装（会锁定到具体 commit）：
@@ -118,7 +118,7 @@ npm test                       # 三套测试：Host 真机 / Client 结构 / �
 
 ```sh
 node test/host.test.mjs        # Host 半：真机 24 项（连不上就跳过网络部分）
-node test/client.test.mjs      # Client 半：结构 12 项
+node test/client.test.mjs      # Client 半：结构 13 项
 node test/panes.test.mjs       # 分屏状态机：3 项
 ```
 
@@ -154,7 +154,7 @@ token 删掉后 workflow 会自动回落到 OIDC；它那条 `npm config delete`
 ## 验证状态
 
 - **Host 半 24 项真机测试**：目录清单、`~` 展开、缺目录报错、CPU/GPU/内存采样、进程行的 rss/线程/时长字段、GPU 进程归属（uid → 命令）、**56 条 GPU 进程一条不少且按卡分组**、命令退出码、文件预览、超时中断、**PTY 的 ANSI/真 `/dev/pts`/窗格尺寸**、**resize 同步**、**全屏程序可跑**、**重开终端复用同一个 shell**、**同一条连接上两个独立 PTY（`t1` 在 `/tmp`、`t2` 在 `/var`，环境与尺寸互不影响）**、**未指定 termId 时明确拒绝而不是瞎猜**、**关一个不影响另一个**、关全部后拒绝写入、双机并行、断开清理。实测 `yz@122.205.68.212:10007`（5×A100）与 `yz@211.69.141.69:26518`。
-- **Client 半 12 项结构测试**：工厂导出、内嵌 chunk 注册与导出面、14 个 descriptor 与 Host 签名逐字对齐、侧边栏与主面板同 id、中英词典对称、样式仅用主题 token、缺少 Remote 载体时明确失败、**概览/进程页只渲染当前选中的那台**、**每张 GPU 卡两根条各自跟自己的指标**、**连接表单是弹窗**、**命令行完整不截断**、**终端自动打开、可新建/分屏/取消分屏且切页不销毁**。
+- **Client 半 13 项结构测试**：工厂导出、内嵌 chunk 注册与导出面、14 个 descriptor 与 Host 签名逐字对齐、侧边栏与主面板同 id、中英词典对称、样式仅用主题 token、缺少 Remote 载体时明确失败、**概览/进程页只渲染当前选中的那台**、**每张 GPU 卡两根条各自跟自己的指标**、**连接表单是弹窗**、**命令行完整不截断**、**终端自动打开、可新建/分屏/取消分屏且切页不销毁**、**一个窗格只挂一个 xterm 实例（并发 open 不再叠画布、不重复发送按键）**。
 - **已用无头 Chrome 实测**：
   - **GPU 进程表用真机数据整表渲染**：55 条进程、5 个分组标题全部出现，命令格 0 个被裁切，表格与页面零横向溢出。
   - 另塞入真实的 224 字符训练命令，在 900 / 1420px 下命令格 `clippedX/Y` 全为 `false`，长命令换到 3 行完整显示。

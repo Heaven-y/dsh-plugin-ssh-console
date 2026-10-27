@@ -12,7 +12,7 @@
  * other, and the documented wrapper keeps them out of the page's module table.
  */
 window.__ModuleLoader__.load({
-  id: "@coder02lq/dsh-plugin-ssh-console",
+  id: "dsh-plugin-ssh-console",
   chunk: "client.xterm.js",
   factory: () => {
     // ---- @xterm/xterm ------------------------------------------------------

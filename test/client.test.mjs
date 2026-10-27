@@ -55,7 +55,7 @@ globalThis.document = documentStub
 const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
 new Function('window', 'document', source)(globalThis.window, documentStub)
 
-const PKG = '@coder02lq/dsh-plugin-ssh-console'
+const PKG = 'dsh-plugin-ssh-console'
 assert.equal(registered.id, PKG, 'the factory registers under the package name')
 
 const exportsObject = registered.factory((specifier) => {
@@ -427,6 +427,24 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   assert.ok(/style: onScreen \? undefined : \{ display: 'none' \}/u.test(term),
     'terminals outside the layout stay mounted but hidden')
 
+  /* ------------------------------------------- one emulator per pane, ever */
+
+  // `open()` awaits mid-flight, and `termRef.current` is only assigned after that
+  // await. Two overlapping calls therefore both passed the old null check and
+  // mounted a second emulator into the same holder: the stale one kept its own
+  // `onData`, so every keystroke was forwarded twice and the two canvases
+  // overlapped in place. That is the corruption seen on the first open of the tab.
+  assert.ok(/const openingRef = React\.useRef\(false\)/u.test(pane),
+    'the pane guards the in-flight window with a synchronous ref')
+  assert.ok(/if \(openingRef\.current\) return/u.test(pane),
+    'a second open while one is in flight returns immediately')
+  assert.ok(/openingRef\.current = true/u.test(pane), 'the guard is taken before the first await')
+  assert.ok(/finally \{\s*openingRef\.current = false\s*\}/u.test(pane),
+    'the guard is released on every path, including failure')
+  assert.ok(/while \(holder\.firstChild !== null\) holder\.removeChild\(holder\.firstChild\)/u.test(pane),
+    'the holder is emptied before mounting, so no stale canvas can survive')
+  console.log('ok 12 - a pane mounts exactly one emulator even when open() races itself')
+
   /* ------------------------------------------ closing one keeps the other */
 
   // The regression: closing one of two dropped its id from both lists, leaving an
@@ -444,7 +462,7 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
     'closing removes the pane id')
   assert.ok(!/setTermIds\(\(current\) => \{[\s\S]*?setPanes/u.test(close[1]),
     'one state update does not nest inside the other')
-  console.log('ok 12 - the terminal opens itself, keeps its session, splits and shows no hint')
+  console.log('ok 13 - the terminal opens itself, keeps its session, splits and shows no hint')
 }
 
 console.log('\nall client harness checks passed')

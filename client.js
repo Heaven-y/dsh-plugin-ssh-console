@@ -1,11 +1,11 @@
 window.__ModuleLoader__.load({
-  id: '@coder02lq/dsh-plugin-ssh-console',
+  id: 'dsh-plugin-ssh-console',
   factory(require) {
     const React = require('react')
     const z = require('zod')
     const h = React.createElement
 
-    const PKG = '@coder02lq/dsh-plugin-ssh-console'
+    const PKG = 'dsh-plugin-ssh-console'
     const LOCALE_NS = 'ssh-console'
     const SERVICE_KEY = 'sshConsole'
     /** Remembers the last picked target across reloads. */
@@ -969,6 +969,16 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       const [exitCode, setExitCode] = React.useState(undefined)
       /** One automatic attempt per pane: a failing host must not spin. */
       const attemptedRef = React.useRef(false)
+      /**
+       * Guards the window in which `open()` has started but not finished.
+       *
+       * The guard below it (`termRef.current`) is only set after an await, so two
+       * overlapping calls would both pass it and mount a second emulator into the
+       * same holder: the stale one stays in the DOM, keeps its own `onData`, and
+       * forwards every keystroke a second time. That is the corruption seen on the
+       * first open, so the check has to be synchronous.
+       */
+      const openingRef = React.useRef(false)
 
       /**
        * Send buffered keystrokes in one call.
@@ -1010,6 +1020,8 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
 
       /** Mount the emulator in the holder and attach to this terminal. */
       const open = React.useCallback(async () => {
+        if (openingRef.current) return
+        openingRef.current = true
         setFailure('')
         setPhase('opening')
         try {
@@ -1020,6 +1032,9 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
             termRef.current.dispose()
             termRef.current = null
           }
+          // A previous instance that lost a race would still own child nodes here;
+          // clearing first guarantees one canvas per pane.
+          while (holder.firstChild !== null) holder.removeChild(holder.firstChild)
           const fit = new vendored.FitAddon()
           const term = new vendored.Terminal({
             cursorBlink: true,
@@ -1032,6 +1047,13 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
           term.loadAddon(fit)
           term.open(holder)
           fit.fit()
+          // Registered before the round trip: xterm answers terminal queries
+          // through this channel, and a program that is waiting for a reply (a
+          // `resize` call in a login script, say) must not be left guessing.
+          term.onData((data) => {
+            pendingRef.current += data
+            if (flushRef.current === undefined) flushRef.current = setTimeout(flush, 16)
+          })
           const opened = await call('termOpen', {
             serverId,
             termId,
@@ -1047,16 +1069,14 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
           fitRef.current = fit
           cursorRef.current = 0
           setSize({ cols: opened.cols, rows: opened.rows })
-          term.onData((data) => {
-            pendingRef.current += data
-            if (flushRef.current === undefined) flushRef.current = setTimeout(flush, 16)
-          })
           term.focus()
           setPhase('open')
           await drain()
         } catch (error) {
           setPhase('closed')
           setFailure(error instanceof Error ? error.message : String(error))
+        } finally {
+          openingRef.current = false
         }
       }, [drain, flush, serverId, termId])
 

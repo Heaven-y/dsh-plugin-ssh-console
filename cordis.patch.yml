@@ -7,7 +7,7 @@
 # add entries here only for a host that is not declared there.
 - insert:
     - id: ssh-console
-      name: '@coder02lq/dsh-plugin-ssh-console'
+      name: 'dsh-plugin-ssh-console'
       config:
         refreshMs: 2000
         execTimeoutMs: 60000

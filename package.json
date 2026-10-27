@@ -1,5 +1,5 @@
 {
-  "name": "@coder02lq/dsh-plugin-ssh-console",
+  "name": "dsh-plugin-ssh-console",
   "version": "1.0.0",
   "description": "Read-only SSH file browser, nvitop-style CPU/GPU monitor and a real multi-pane PTY terminal for DeepSeek Harness, as a dedicated main panel.",
   "keywords": [

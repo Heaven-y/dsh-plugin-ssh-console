@@ -12,7 +12,7 @@
  * marker are assembled structurally, matching what `@deepseek-ai/dsh-typert-protocol`
  * produces for generated code.
  *
- * @module @coder02lq/dsh-plugin-ssh-console
+ * @module dsh-plugin-ssh-console
  */
 
 import { readFileSync, existsSync, statSync } from 'node:fs'
