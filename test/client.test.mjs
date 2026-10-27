@@ -443,7 +443,36 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
     'the guard is released on every path, including failure')
   assert.ok(/while \(holder\.firstChild !== null\) holder\.removeChild\(holder\.firstChild\)/u.test(pane),
     'the holder is emptied before mounting, so no stale canvas can survive')
-  console.log('ok 12 - a pane mounts exactly one emulator even when open() races itself')
+
+  /* ------------------------- the renderer's own stylesheet must be installed */
+
+  // The regression: `@xterm/xterm` ships `xterm.css` and nothing on the Harness
+  // page loads it. Unstyled, `.xterm-screen`/`.xterm-rows` lose their absolute
+  // positioning so glyphs overlap into runs like `$$$$$$$$`, and the helper
+  // textarea — normally hidden at zero size — becomes a box the user can type
+  // into. Every earlier headless probe injected that CSS by hand and so never
+  // reproduced it; only rendering the shipped path does.
+  assert.ok(/function insertXtermStyles\(css\)/u.test(source), 'the vendored stylesheet has an injector')
+  assert.ok(/insertXtermStyles\(vendored\.css\)/u.test(pane),
+    'open() installs the stylesheet before mounting the emulator')
+  const inject = /function insertXtermStyles\(css\) \{([\s\S]*?)\n    \}/u.exec(source)
+  assert.ok(inject !== null, 'insertXtermStyles has a body')
+  assert.ok(inject[1].includes('data-dsh-xterm'),
+    'a marker attribute makes the sheet findable, so it is installed once')
+  assert.ok(/typeof css !== 'string'/u.test(inject[1]), 'a chunk without CSS is tolerated')
+
+  // A fit against a collapsed box must not be believed: `fit()` reports 2x1 for a
+  // hidden container, and a PTY told it is two columns wide wraps its prompt and
+  // leaves the redraw tail on screen once the real width arrives.
+  assert.ok(/function safeFit\(term, fit, holder\)/u.test(source), 'fitting is guarded')
+  const safe = /function safeFit\(term, fit, holder\) \{([\s\S]*?)\n    \}/u.exec(source)
+  assert.ok(safe !== null, 'safeFit has a body')
+  assert.ok(/holder\.clientWidth < 40/u.test(safe[1]), 'a collapsed box is treated as unmeasured')
+  assert.ok(/term\.cols < MIN_TERM_COLS/u.test(safe[1]), 'the measured geometry has a floor')
+  assert.ok(/FALLBACK_TERM_SIZE/u.test(pane), 'an unmeasurable pane opens at a sane default instead of 2x1')
+  assert.ok(/if \(!readyRef\.current\) return/u.test(pane),
+    'no resize happens before the first screen is drawn')
+  console.log('ok 12 - the renderer stylesheet is installed and a collapsed fit is never believed')
 
   /* ------------------------------------------ closing one keeps the other */
 

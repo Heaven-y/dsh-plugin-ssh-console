@@ -942,6 +942,59 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
     }
 
     /**
+     * Insert the vendored renderer's own base stylesheet, once per document.
+     *
+     * `@xterm/xterm` ships `xterm.css` and relies on it being on the page. The
+     * Harness loads a package's Client half as a plain script, so nothing
+     * injects it, and the renderer then runs unstyled: the glyph grid loses its
+     * absolute positioning and characters overlap, while `.xterm-helper-textarea`
+     * — normally hidden at zero size far off-screen — shows up as a real box the
+     * user can type into.
+     * @param css - the stylesheet text carried by the chunk.
+     */
+    function insertXtermStyles(css) {
+      if (typeof document === 'undefined') return
+      if (typeof css !== 'string' || css.length === 0) return
+      if (document.querySelector('style[data-dsh-xterm]') !== null) return
+      const tag = document.createElement('style')
+      tag.dataset.dshXterm = 'true'
+      tag.textContent = css
+      document.head.appendChild(tag)
+    }
+
+    /**
+     * Smallest geometry a terminal may be opened or resized to.
+     *
+     * The Host enforces the same floor, but a fit against an unmeasurable box
+     * produces 1–2 columns here first, and a PTY briefly told it is two columns
+     * wide makes the shell wrap its prompt, redraw it, and leave the remains on
+     * screen once the real width arrives.
+     */
+    const MIN_TERM_COLS = 20
+    const MIN_TERM_ROWS = 5
+    /** Geometry used when the pane cannot be measured yet, matching the Host default. */
+    const FALLBACK_TERM_SIZE = Object.freeze({ cols: 100, rows: 30 })
+
+    /**
+     * Fit the emulator to its box, but only when that box is real.
+     *
+     * `fit()` reports a plausible-looking 2×1 for a hidden or not-yet-laid-out
+     * container, and acting on that number is what corrupts the first render.
+     * @param term - the emulator, or null.
+     * @param fit - its fit addon, or null.
+     * @param holder - the box it lives in.
+     * @returns whether a usable geometry was measured.
+     */
+    function safeFit(term, fit, holder) {
+      if (term === null || fit === null || holder === null) return false
+      // A collapsed box is not a small terminal, it is an unmeasured one.
+      if (holder.clientWidth < 40 || holder.clientHeight < 40) return false
+      fit.fit()
+      if (term.cols < MIN_TERM_COLS || term.rows < MIN_TERM_ROWS) return false
+      return true
+    }
+
+    /**
      * One remote PTY rendered by the vendored xterm.
      *
      * Output is pulled with a short poll against a byte cursor rather than pushed
@@ -979,6 +1032,16 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
        * first open, so the check has to be synchronous.
        */
       const openingRef = React.useRef(false)
+      /**
+       * Set once the first batch of output has been drawn.
+       *
+       * A resize before that would make the remote shell redraw its prompt at a
+       * geometry the emulator never showed, and the redraw bookkeeping of a
+       * wrapped prompt (`CR`, erase-to-end-of-line, cursor-up) then lands on the
+       * wrong rows and leaves its tail on screen. Nothing may resize until the
+       * screen shown and the screen described agree.
+       */
+      const readyRef = React.useRef(false)
 
       /**
        * Send buffered keystrokes in one call.
@@ -1022,10 +1085,17 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       const open = React.useCallback(async () => {
         if (openingRef.current) return
         openingRef.current = true
+        readyRef.current = false
         setFailure('')
         setPhase('opening')
         try {
           const vendored = await require.async('./client.xterm.js')
+          // The renderer ships its own base stylesheet and nothing else loads it.
+          // Without it `.xterm-screen`/`.xterm-rows` lose their absolute
+          // positioning, so the glyph grid collapses into normal text flow and
+          // characters overlap — and the helper textarea, normally hidden at zero
+          // size far off-screen, becomes a visible box a user can type into.
+          insertXtermStyles(vendored.css)
           const holder = holderRef.current
           if (holder === null) throw new Error('The terminal container is not mounted yet.')
           if (termRef.current !== null) {
@@ -1046,7 +1116,12 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
           })
           term.loadAddon(fit)
           term.open(holder)
-          fit.fit()
+          // Only fit once the pane has a real box; a collapsed one reports a
+          // 2-column geometry that would make the shell wrap its prompt.
+          const measured = safeFit(term, fit, holder)
+          const opening = measured
+            ? { cols: term.cols, rows: term.rows }
+            : { ...FALLBACK_TERM_SIZE }
           // Registered before the round trip: xterm answers terminal queries
           // through this channel, and a program that is waiting for a reply (a
           // `resize` call in a login script, say) must not be left guessing.
@@ -1057,12 +1132,13 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
           const opened = await call('termOpen', {
             serverId,
             termId,
-            cols: term.cols,
-            rows: term.rows,
+            cols: opening.cols,
+            rows: opening.rows,
           })
           // An attached terminal keeps the size the Host already had; adopt it so
-          // the emulator and the PTY agree on where lines wrap.
-          if (opened.cols !== term.cols || opened.rows !== term.rows) {
+          // the emulator and the PTY agree on where lines wrap. Only do it when the
+          // box was measurable — otherwise this defers to the layout effect.
+          if (measured && (opened.cols !== term.cols || opened.rows !== term.rows)) {
             term.resize(opened.cols, opened.rows)
           }
           termRef.current = term
@@ -1072,6 +1148,10 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
           term.focus()
           setPhase('open')
           await drain()
+          // The screen now shows what the PTY described, so resizes may follow.
+          readyRef.current = true
+          const holderNow = holderRef.current
+          if (holderNow !== null) safeFit(term, fit, holderNow)
         } catch (error) {
           setPhase('closed')
           setFailure(error instanceof Error ? error.message : String(error))
@@ -1129,9 +1209,14 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
         const refit = () => {
           const fit = fitRef.current
           const term = termRef.current
-          if (fit === null || term === null || holder === null) return
-          if (holder.clientWidth === 0 || holder.clientHeight === 0) return
-          fit.fit()
+          if (fit === null || term === null) return
+          // A resize before the first screen is drawn would make the shell redraw
+          // its prompt at a geometry the emulator never showed, leaving the tail
+          // of the old wrapped prompt behind.
+          if (!readyRef.current) return
+          const before = `${term.cols}x${term.rows}`
+          if (!safeFit(term, fit, holder)) return
+          if (`${term.cols}x${term.rows}` === before) return
           setSize({ cols: term.cols, rows: term.rows })
           void call('termResize', { serverId, termId, cols: term.cols, rows: term.rows }).catch(() => {})
         }
