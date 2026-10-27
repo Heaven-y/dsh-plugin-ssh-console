@@ -1,5 +1,8 @@
 # dsh-plugin-ssh-console
 
+[![npm](https://img.shields.io/npm/v/dsh-plugin-ssh-console.svg)](https://www.npmjs.com/package/dsh-plugin-ssh-console)
+[![Test](https://github.com/Heaven-y/dsh-plugin-ssh-console/actions/workflows/test.yml/badge.svg)](https://github.com/Heaven-y/dsh-plugin-ssh-console/actions/workflows/test.yml)
+
 **给 DeepSeek Harness 补一个「SSH 控制台」面板：连上远程服务器，只读看目录、像 nvitop 那样盯 CPU/GPU、并开一个真正的交互式终端。**
 
 侧边栏新增一个图标（和「插件」「自动化」并排），点开是主区域整页。对话记录不受影响，点回对话就回去了。
@@ -89,6 +92,8 @@
 ```
 dsh-plugin-ssh-console
 ```
+
+也可以直接填版本 `dsh-plugin-ssh-console@1.0.0`。
 
 装完**完全退出 App 再打开**（Host 半与客户端 chunk 都变了，HMR 不重载插件 JS）。
 
