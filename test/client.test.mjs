@@ -296,6 +296,42 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
     assert.ok(/\bsession\b/u.test(body), `${name} takes the selected session`)
   }
   console.log('ok 9 - the overview and process tabs render only the selected host')
+
+  /* ------------------------------ what survives a tab switch, and what does not */
+
+  // The file browser is per host and stays mounted. Unmounting it reset the walk
+  // to `~` on every tab switch, throwing away the directory the user was reading
+  // — the only state here that costs SSH round trips to rebuild.
+  const page = bodyOf('SshConsolePage')
+  assert.ok(/const filesLayers = sessions\.map/u.test(page), 'one file browser is mounted per host')
+  assert.ok(page.includes('filesLayers'), 'the file browsers are rendered')
+  assert.ok(!/tab === 'files'\s*\n?\s*\?\s*h\(FilesTab/u.test(page),
+    'the file browser is no longer created only for the active tab')
+  assert.ok(/visible: tab === 'files' && session\.serverId === activeId/u.test(page),
+    'only the selected host\'s file browser is laid out')
+  assert.ok(/function FilesTab\(\{ serverId, t, visible \}\)/u.test(clientSource),
+    'the file browser takes the visible flag')
+  assert.ok(/style: visible \? undefined : \{ display: 'none' \}/u.test(clientSource),
+    'a hidden file browser is mounted but not laid out')
+  // Navigating away and back must re-read the open directory, not the home one.
+  const files = bodyOf('FilesTab')
+  assert.ok(/void load\(path\)/u.test(files), 'returning to the tab re-reads the current directory')
+  assert.ok(/if \(!visible \|\| !loadedRef\.current\) return/u.test(files),
+    'the refresh happens on becoming visible, not on every render')
+
+  // Overview and processes own no state of their own: they render the snapshot the
+  // page holds, so a remount costs no request beyond the poll that resumes.
+  for (const name of ['OverviewTab', 'ProcessesTab']) {
+    assert.ok(!/useState/u.test(bodyOf(name)), `${name} keeps no private state to lose`)
+  }
+  // And polling stops while neither of them is on screen.
+  assert.ok(/const pollable = tab === 'overview' \|\| tab === 'processes'/u.test(page),
+    'sampling is limited to the two tabs that display it')
+
+  // Connecting is a user action only: switching tabs or hosts must never reach it.
+  assert.equal((clientSource.match(/call\('connect'/gu) ?? []).length, 1,
+    'the only connect call is the connector handler')
+  console.log('ok 10 - a tab switch keeps the file browser\'s place and never reconnects')
 }
 
 /* --------------------------------------------------- gauges and the dialog */
@@ -326,7 +362,7 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   const page = bodyOf('SshConsolePage')
   assert.ok(page.includes('connectorDialog'), 'the page renders the dialog')
   assert.ok(!page.includes('ssc-connector-row'), 'the connector no longer inlines above the tabs')
-  console.log('ok 10 - each GPU gauge tracks its own metric and the connector is a dialog')
+  console.log('ok 11 - each GPU gauge tracks its own metric and the connector is a dialog')
 }
 
 /* ------------------------------------------------- full command, never cut */
@@ -356,7 +392,7 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   assert.ok(/td\.ssc-cmd\{[^}]*white-space:normal/u.test(css), 'the command cell wraps instead of clipping')
   assert.ok(/td\.ssc-cmd\{[^}]*overflow-wrap:anywhere/u.test(css), 'a long path can break mid-token')
   assert.ok(!/ssc-table-wide\{min-width:8\d\dpx\}/u.test(css), 'the table no longer forces an 860px floor')
-  console.log('ok 11 - the process tables show the full command line')
+  console.log('ok 12 - the process tables show the full command line')
 }
 
 /* ------------------------------------------------------- terminal lifecycle */
@@ -472,7 +508,7 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   assert.ok(/FALLBACK_TERM_SIZE/u.test(pane), 'an unmeasurable pane opens at a sane default instead of 2x1')
   assert.ok(/if \(!readyRef\.current\) return/u.test(pane),
     'no resize happens before the first screen is drawn')
-  console.log('ok 12 - the renderer stylesheet is installed and a collapsed fit is never believed')
+  console.log('ok 13 - the renderer stylesheet is installed and a collapsed fit is never believed')
 
   /* ------------------------------------------ closing one keeps the other */
 
@@ -491,7 +527,7 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
     'closing removes the pane id')
   assert.ok(!/setTermIds\(\(current\) => \{[\s\S]*?setPanes/u.test(close[1]),
     'one state update does not nest inside the other')
-  console.log('ok 13 - the terminal opens itself, keeps its session, splits and shows no hint')
+  console.log('ok 14 - the terminal opens itself, keeps its session, splits and shows no hint')
 }
 
 console.log('\nall client harness checks passed')

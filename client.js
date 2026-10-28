@@ -121,6 +121,9 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
 .ssc-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px}
 
 /* files */
+/* The browser is mounted per host and hidden with display:none, so it must not
+   contribute layout while another tab is on screen. */
+.ssc-files{display:block}
 .ssc-path{display:flex;align-items:center;gap:8px;margin-bottom:12px}
 .ssc-path-text{flex:1;min-width:0;padding:6px 10px;border:.5px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-1);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ssc-entry{display:flex;align-items:center;gap:10px;width:100%;padding:6px 10px;border:0;border-radius:7px;background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12.5px;text-align:left;cursor:pointer}
@@ -792,12 +795,17 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
     }
 
     /**
-     * The files tab: a read-only directory walk with a text preview, against the
-     * active server.
-     * @param props - the active server id and the locale lookup.
+     * The files tab: a read-only directory walk with a text preview.
+     *
+     * One of these is mounted per connected server and only the selected one is
+     * laid out, the same way terminals are kept. Unmounting it instead would put
+     * the walk back at `~` on every tab switch, which loses the directory the
+     * user was reading — the one piece of state in this panel that is expensive
+     * to rebuild, because rebuilding it means SSH round trips.
+     * @param props - the server id, whether it is laid out, and the locale lookup.
      * @returns the tab body.
      */
-    function FilesTab({ serverId, t }) {
+    function FilesTab({ serverId, t, visible }) {
       const [path, setPath] = React.useState('~')
       const [listing, setListing] = React.useState(null)
       const [loading, setLoading] = React.useState(false)
@@ -820,9 +828,25 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
         }
       }, [serverId])
 
+      // First mount loads the home directory. `load` is keyed on the server, so
+      // this runs once per server rather than on every render.
+      const loadedRef = React.useRef(false)
       React.useEffect(() => {
+        if (loadedRef.current) return
+        loadedRef.current = true
         void load('~')
       }, [load])
+
+      // Coming back to this tab re-reads the directory that is already open, so
+      // what is shown is current without losing the user's place.
+      React.useEffect(() => {
+        if (!visible || !loadedRef.current) return
+        void load(path)
+        // `path` is deliberately read, not depended on: navigating while visible
+        // loads its own directory, and re-running on every path change would
+        // double every request.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [visible])
 
       const join = React.useCallback((base, name) => (base.endsWith('/') ? `${base}${name}` : `${base}/${name}`), [])
 
@@ -858,8 +882,11 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
         return parts.join('/') || '/'
       }, [path])
 
-      return h(React.Fragment, null,
-        h('div', { className: 'ssc-path' },
+      return h('div', {
+        className: 'ssc-files',
+        style: visible ? undefined : { display: 'none' },
+      },
+      h('div', { className: 'ssc-path' },
           h('button', { type: 'button', className: 'ssc-btn ssc-btn-quiet', onClick: () => void load(parentPath), disabled: loading }, t('files.up')),
           h('span', { className: 'ssc-path-text', title: path }, path),
           h('button', { type: 'button', className: 'ssc-btn ssc-btn-quiet', onClick: () => void load(path), disabled: loading }, t('files.refresh'))),
@@ -902,7 +929,6 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
                   : `${preview.text}${preview.truncated === true ? `\n\n… ${t('files.clipped')}` : ''}`))
           : null)
     }
-
     /**
      * Resolve the few theme colours xterm needs.
      *
@@ -1785,6 +1811,17 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
         })
       })
 
+      // Files are kept the same way, for a different reason: the directory being
+      // read is the only state in this panel that costs SSH round trips to
+      // rebuild, so it must survive a tab or host switch rather than reset to `~`.
+      // A hidden one does no work — nothing here polls.
+      const filesLayers = sessions.map((session) => h(FilesTab, {
+        key: `files:${session.serverId}`,
+        serverId: session.serverId,
+        visible: tab === 'files' && session.serverId === activeId,
+        t,
+      }))
+
       const header = h('div', { className: 'ssc-head' },
         h('span', { className: 'ssc-head-icon' }, h(ConsoleIcon, { size: 16 })),
         h('h2', { className: 'ssc-title' }, t('panel.title')),
@@ -1894,9 +1931,11 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
                   ? h(OverviewTab, { key: `overview:${activeId}`, session: active, snapshot: snapshots[activeId] ?? null, t })
                   : tab === 'processes'
                     ? h(ProcessesTab, { key: `processes:${activeId}`, session: active, snapshot: snapshots[activeId] ?? null, t })
-                    : tab === 'files'
-                      ? h(FilesTab, { key: `files:${activeId}`, serverId: activeId, t })
-                      : null,
+                    : null,
+              // One mounted file browser per host: leaving the tab hides it and
+              // coming back re-reads the directory that is already open, instead
+              // of dumping the user back at `~`.
+              filesLayers,
               // One mounted terminal per host, kept alive across tab and host
               // switches. Only the selected one is laid out and visible, so the
               // others keep their scrollback without drawing.

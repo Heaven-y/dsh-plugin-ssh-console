@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-ssh-console",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Read-only SSH file browser, nvitop-style CPU/GPU monitor and a real multi-pane PTY terminal for DeepSeek Harness, as a dedicated main panel.",
   "keywords": [
     "dsh",
