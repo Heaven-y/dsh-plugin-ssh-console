@@ -315,9 +315,21 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
     'a hidden file browser is mounted but not laid out')
   // Navigating away and back must re-read the open directory, not the home one.
   const files = bodyOf('FilesTab')
-  assert.ok(/void load\(path\)/u.test(files), 'returning to the tab re-reads the current directory')
-  assert.ok(/if \(!visible \|\| !loadedRef\.current\) return/u.test(files),
+  assert.ok(/void load\(listedRef\.current\.length > 0 \? listedRef\.current : '~'\)/u.test(files),
+    'returning to the tab re-reads the directory already on screen')
+  assert.ok(/if \(!visible\) return/u.test(files),
     'the refresh happens on becoming visible, not on every render')
+  // Exactly one request per showing. Two effects used to race here: the mount
+  // effect read the home directory and the visibility effect read the same one
+  // straight after, before the first response could land and set `path`.
+  const visibilityEffect = /React\.useEffect\(\(\) => \{\n        if \(!visible\) return[\s\S]*?\n      \}, \[visible\]\)/u.exec(files)
+  assert.ok(visibilityEffect !== null, 'one effect owns the loading, keyed on visibility')
+  assert.equal((visibilityEffect[0].match(/void load\(/gu) ?? []).length, 2,
+    'the effect loads once for the first showing and once for each later one')
+  assert.ok(/if \(!loadedRef\.current\) \{/u.test(files),
+    'the first showing and every later one take different paths through the effect')
+  assert.ok(/listedRef\.current = value\.path/u.test(files),
+    'the resolved path is remembered for the next refresh')
 
   // Overview and processes own no state of their own: they render the snapshot the
   // page holds, so a remount costs no request beyond the poll that resumes.
@@ -356,29 +368,42 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   const names = (crumbs) => crumbs.map((crumb) => crumb.name)
   const paths = (crumbs) => crumbs.map((crumb) => crumb.path)
 
-  // Every level is reachable in one click, and each entry knows its own path.
-  assert.deepEqual(names(buildCrumbs('/home/syz/project', '/home/syz')), ['~', 'project'],
-    'a path under home starts at ~')
-  assert.deepEqual(paths(buildCrumbs('/home/syz/project', '/home/syz')),
-    ['/home/syz', '/home/syz/project'], 'each crumb carries the path it navigates to')
+  // The trail spells out the real path from the root, so every prefix level is a
+  // target. This is the case the control exists for: on
+  // /home/yz/lq/test1/test2/test3 the user wants to click `test1` and land there
+  // without walking up three times. Collapsing the home prefix into `~` would
+  // hide `/home` and `/yz` and make them unreachable, which is why it is gone.
+  const deep = buildCrumbs('/home/yz/lq/test1/test2/test3')
+  assert.deepEqual(names(deep), ['/', 'home', 'yz', 'lq', 'test1', 'test2', 'test3'],
+    'every level of a deep path gets its own crumb')
+  assert.deepEqual(paths(deep), [
+    '/', '/home', '/home/yz', '/home/yz/lq',
+    '/home/yz/lq/test1', '/home/yz/lq/test1/test2',
+    '/home/yz/lq/test1/test2/test3',
+  ], 'each crumb carries the absolute path it navigates to')
+  // The concrete jump the user asked for.
+  const test1 = deep.find((crumb) => crumb.name === 'test1')
+  assert.equal(test1.path, '/home/yz/lq/test1', 'clicking test1 navigates to /home/yz/lq/test1')
 
-  // Outside home the root is the anchor instead.
-  assert.deepEqual(names(buildCrumbs('/etc/nginx/conf.d', '/home/syz')), ['/', 'etc', 'nginx', 'conf.d'],
-    'a path outside home starts at the root')
-  assert.deepEqual(paths(buildCrumbs('/etc/nginx', '/home/syz')), ['/', '/etc', '/etc/nginx'])
+  // The home directory is shown as its real path, not as `~`; the toolbar button
+  // keeps the shorthand for jumping there.
+  assert.deepEqual(names(buildCrumbs('/home/yz')), ['/', 'home', 'yz'],
+    'the home directory spells itself out')
+  assert.deepEqual(names(buildCrumbs('/')), ['/'])
+  assert.deepEqual(paths(buildCrumbs('/')), ['/'])
 
-  // The home directory itself is a single crumb, not `~` plus an empty tail.
-  assert.deepEqual(names(buildCrumbs('/home/syz', '/home/syz')), ['~'])
-  assert.deepEqual(names(buildCrumbs('/', '/home/syz')), ['/'])
-  assert.deepEqual(names(buildCrumbs('/', '')), ['/'])
-
-  // A sibling whose name merely starts with the home directory's name is not
-  // inside it. Without the separator check, `/home/syz2` would render as `~2`.
-  assert.deepEqual(names(buildCrumbs('/home/syz2/data', '/home/syz')), ['/', 'home', 'syz2', 'data'],
-    'the home prefix test respects the separator boundary')
+  // Before the first listing resolves, `path` is empty or a bare `~`. Neither
+  // must produce a clickable entry pointing at a directory like `/~`.
+  assert.deepEqual(names(buildCrumbs('')), ['/'], 'an unresolved path shows the root alone')
+  assert.deepEqual(names(buildCrumbs('~')), ['/'], 'a bare tilde shows the root alone')
 
   // A trailing slash must not produce an empty final crumb.
-  assert.deepEqual(names(buildCrumbs('/var/log/', '/home/syz')), ['/', 'var', 'log'])
+  assert.deepEqual(names(buildCrumbs('/var/log/')), ['/', 'var', 'log'])
+
+  // Sibling directories are distinct; no prefix of one may be mistaken for
+  // another's ancestor.
+  assert.deepEqual(paths(buildCrumbs('/home/syz2/data')),
+    ['/', '/home', '/home/syz2', '/home/syz2/data'])
 
   // The bar is an editor as well: the address is a real input, so a deep path
   // can be typed instead of walked. Enter commits, Escape and blur abandon.
@@ -392,8 +417,10 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   assert.ok(/if \(next\.length === 0 \|\| next === path\) return/u.test(bar),
     're-submitting the same path costs no SSH round trip')
   assert.ok(/void load\('~'\)/u.test(bar), 'the home button jumps to the home directory')
-  assert.ok(/setHome\(\(current\) => \(current\.length === 0 \? value\.path : current\)\)/u.test(bar),
-    'home is learned from the first listing, not guessed')
+  // The breadcrumb no longer needs the home directory: it spells out the real
+  // path. Keeping the state around would only invite the collapsing behaviour
+  // back, so its absence is asserted rather than its shape.
+  assert.ok(!/setHome/u.test(bar), 'the breadcrumb does not depend on a remembered home directory')
 
   // And every crumb is a button, so a click navigates to that level.
   assert.ok(/crumb\.path === path\) return/u.test(bar), 'clicking the current level is a no-op')

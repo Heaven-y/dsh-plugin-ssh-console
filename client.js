@@ -127,8 +127,10 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
 .ssc-path{display:flex;align-items:center;gap:6px;margin-bottom:12px}
 /* A square, quiet button for the toolbar glyphs: ↑ ~ ✎ ⟳ */
 .ssc-path-btn{flex:none;width:28px;height:28px;padding:0;justify-content:center;font-size:13px;line-height:1}
-.ssc-crumbs{flex:1;min-width:0;display:flex;align-items:center;gap:2px;height:28px;padding:0 8px;border:.5px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-1);overflow-x:auto;overflow-y:hidden;white-space:nowrap;cursor:text;scrollbar-width:none}
-.ssc-crumbs::-webkit-scrollbar{display:none}
+.ssc-crumbs{flex:1;min-width:0;display:flex;align-items:center;gap:2px;height:28px;padding:0 8px;border:.5px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-1);overflow-x:auto;overflow-y:hidden;white-space:nowrap;cursor:text;scrollbar-width:thin;scrollbar-color:var(--dsw-alias-border-l2) transparent}
+.ssc-crumbs::-webkit-scrollbar{height:4px}
+.ssc-crumbs::-webkit-scrollbar-thumb{background:var(--dsw-alias-border-l2);border-radius:2px}
+.ssc-crumbs::-webkit-scrollbar-track{background:transparent}
 .ssc-crumb-wrap{display:inline-flex;align-items:center;gap:2px;flex:none}
 .ssc-crumb-sep{color:var(--dsw-alias-label-secondary);font-size:11px;opacity:.7}
 .ssc-crumb{flex:none;padding:2px 5px;border:0;border-radius:5px;background:transparent;color:var(--dsw-alias-label-secondary);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;cursor:pointer;line-height:1.3}
@@ -813,24 +815,27 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
     /**
      * Split an absolute path into one breadcrumb entry per level.
      *
-     * Each entry carries the absolute path it stands for, which is what makes
-     * any level a single click away. When the path is inside the home directory
-     * the first entry is `~` rather than `/`, so a long `/home/<someone>` prefix
-     * does not eat the bar. The prefix test is on a separator boundary: `/home/a`
-     * must not be treated as an ancestor of `/home/ab`.
+     * Every level gets its own entry carrying the absolute path it stands for,
+     * so any depth is a single click away rather than one `cd ..` per level.
+     *
+     * The trail always spells out the real path, `/` first. Collapsing a prefix
+     * under the home directory into a single `~` entry was tried and is worse for
+     * exactly the case this control exists for: on `/home/yz/lq/test1` it renders
+     * `~ › lq › test1`, which makes `/home` and `/yz` unreachable, and it hides
+     * where the directory actually is. A separate toolbar button still offers
+     * `~` for jumping home, where the shorthand costs nothing.
      * @param path - the absolute path currently listed.
-     * @param home - the home directory, or an empty string when not yet known.
      * @returns the entries, root first.
      */
-    function buildCrumbs(path, home) {
-      const current = String(path).replace(/\/+$/u, '') || '/'
-      const underHome = home.length > 0 && (current === home || current.startsWith(`${home}/`))
-      const entries = underHome
-        ? [{ name: '~', path: home, full: home }]
-        : [{ name: '/', path: '/', full: '/' }]
-      const rest = underHome ? current.slice(home.length) : current
-      let accumulated = underHome ? home : ''
-      for (const part of rest.split('/')) {
+    function buildCrumbs(path) {
+      const entries = [{ name: '/', path: '/', full: '/' }]
+      const current = String(path).replace(/\/+$/u, '')
+      // Before the first listing arrives `path` is not yet absolute, and a
+      // relative value would otherwise render as a bogus clickable `~` entry
+      // pointing at `/~`. The root alone is the honest thing to show.
+      if (!current.startsWith('/')) return entries
+      let accumulated = ''
+      for (const part of current.split('/')) {
         if (part.length === 0) continue
         accumulated = `${accumulated}/${part}`
         entries.push({ name: part, path: accumulated, full: accumulated })
@@ -850,20 +855,23 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
      * @returns the tab body.
      */
     function FilesTab({ serverId, t, visible }) {
-      const [path, setPath] = React.useState('~')
+      // Empty until the first listing answers with a resolved absolute path; the
+      // breadcrumb shows just the root meanwhile rather than a guess.
+      const [path, setPath] = React.useState('')
       const [listing, setListing] = React.useState(null)
       const [loading, setLoading] = React.useState(false)
       const [failure, setFailure] = React.useState('')
       const [preview, setPreview] = React.useState(null)
       const [previewLoading, setPreviewLoading] = React.useState(false)
-      // The home directory, learned from the first listing. Knowing it lets the
-      // address bar show `~` instead of `/home/<someone>` and keeps the
-      // breadcrumb short on the deep paths that actually need it.
-      const [home, setHome] = React.useState('')
       const [editing, setEditing] = React.useState(false)
       const [draft, setDraft] = React.useState('')
       const inputRef = React.useRef(null)
       const crumbsRef = React.useRef(null)
+
+      // The directory currently listed, as the server resolved it. Kept in a ref
+      // so the visibility effect can re-read it without depending on `path`,
+      // which would re-run on every navigation.
+      const listedRef = React.useRef('')
 
       const load = React.useCallback(async (next) => {
         setLoading(true)
@@ -872,7 +880,7 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
           const value = await call('listDir', { serverId, path: next })
           setListing(value)
           setPath(value.path)
-          setHome((current) => (current.length === 0 ? value.path : current))
+          listedRef.current = value.path
         } catch (error) {
           setFailure(error instanceof Error ? error.message : String(error))
           setListing(null)
@@ -881,23 +889,23 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
         }
       }, [serverId])
 
-      // First mount loads the home directory. `load` is keyed on the server, so
-      // this runs once per server rather than on every render.
+      // One request when this tab is first shown, and one each time it is shown
+      // again. This used to be two effects, which raced on the first visit: the
+      // mount effect started a read of the home directory and the visibility
+      // effect immediately read the same one, because the first response had not
+      // landed and `path` was still the unresolved `~`.
       const loadedRef = React.useRef(false)
       React.useEffect(() => {
-        if (loadedRef.current) return
-        loadedRef.current = true
-        void load('~')
-      }, [load])
-
-      // Coming back to this tab re-reads the directory that is already open, so
-      // what is shown is current without losing the user's place.
-      React.useEffect(() => {
-        if (!visible || !loadedRef.current) return
-        void load(path)
-        // `path` is deliberately read, not depended on: navigating while visible
-        // loads its own directory, and re-running on every path change would
-        // double every request.
+        if (!visible) return
+        if (!loadedRef.current) {
+          loadedRef.current = true
+          void load('~')
+          return
+        }
+        // Coming back re-reads the directory already on screen, so what is shown
+        // is current without moving the user. If the first attempt never
+        // succeeded there is nothing to return to, so try home again.
+        void load(listedRef.current.length > 0 ? listedRef.current : '~')
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, [visible])
 
@@ -935,11 +943,8 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
         return parts.join('/') || '/'
       }, [path])
 
-      // The breadcrumb. Each crumb carries the absolute path it navigates to, so
-      // any level is one click away instead of one `cd ..` per level. The home
-      // directory is shown as `~`, which is both shorter than `/home/<someone>`
-      // and the form the address bar accepts.
-      const crumbs = React.useMemo(() => buildCrumbs(path, home), [path, home])
+      // The breadcrumb: the real path, one clickable entry per level.
+      const crumbs = React.useMemo(() => buildCrumbs(path), [path])
 
       const beginEdit = React.useCallback(() => {
         setDraft(path)
