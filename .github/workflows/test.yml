@@ -3,8 +3,31 @@ name: Test
 on:
   push:
     branches: [main]
+    # Documentation cannot change a test outcome, and a matrix of seven jobs for
+    # a README edit is pure noise. This only skips when *every* changed path is
+    # ignored; touching any source file still runs the whole suite.
+    #
+    # Caveat: a skipped run reports no check at all. If this workflow is ever
+    # made a required status check, a docs-only PR would sit blocked forever —
+    # drop these filters at that point, or add a separate always-run gate.
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitattributes'
+      - '.gitignore'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitattributes'
+      - '.gitignore'
   workflow_dispatch:
+
+# Pushing twice in a row should cancel the older run rather than queue behind it:
+# only the newest commit's result decides whether main is green.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
 
 # Nothing here talks to a registry or writes to the repository, so the default
 # read-only token is all it needs.
@@ -29,11 +52,16 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
 
-      # `ssh2` pulls one optional native dependency (cpu-features) that only
-      # speeds up cipher selection; the pure-JavaScript path is what ships, so
-      # there is no reason to make every job compile it.
+      # `--ignore-scripts` is the important flag here, and it is not about
+      # security. `ssh2` declares `"install": "node install.js"`, which runs
+      # `node-gyp rebuild` to build an optional native crypto binding that this
+      # plugin never needs — the pure-JavaScript path is what ships and what runs.
+      # On a cold Windows runner that compile dominates the job: measured at
+      # 122s of a 124s job, against 5s on Ubuntu where the build finds no
+      # toolchain and gives up immediately. `--omit=optional` does not help,
+      # because the script belongs to ssh2 itself, which is a real dependency.
       - name: Install
-        run: npm ci --omit=optional
+        run: npm ci --omit=optional --ignore-scripts
 
       - name: Host tests
         run: node test/host.test.mjs
@@ -57,8 +85,10 @@ jobs:
           node-version: '24'
           cache: npm
 
+      # The renderer and the fit addon are plain JavaScript, so no install script
+      # is needed to rebuild the chunk either.
       - name: Install
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Rebuild the vendored renderer
         run: npm run build

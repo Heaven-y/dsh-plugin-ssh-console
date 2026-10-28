@@ -31,8 +31,11 @@ jobs:
           node-version: '24'
           cache: npm
 
+      # `--ignore-scripts` skips ssh2's `node-gyp rebuild` for a native crypto
+      # binding this plugin never uses; see the note in test.yml. A publish must
+      # not fail because a C++ toolchain was slow or absent.
       - name: Install
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       # Publishing a stale vendored renderer would ship a terminal that does not
       # match the sources next to it, so the tag must carry a current build.
