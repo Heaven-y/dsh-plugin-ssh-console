@@ -124,8 +124,18 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
 /* The browser is mounted per host and hidden with display:none, so it must not
    contribute layout while another tab is on screen. */
 .ssc-files{display:block}
-.ssc-path{display:flex;align-items:center;gap:8px;margin-bottom:12px}
-.ssc-path-text{flex:1;min-width:0;padding:6px 10px;border:.5px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-1);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ssc-path{display:flex;align-items:center;gap:6px;margin-bottom:12px}
+/* A square, quiet button for the toolbar glyphs: ↑ ~ ✎ ⟳ */
+.ssc-path-btn{flex:none;width:28px;height:28px;padding:0;justify-content:center;font-size:13px;line-height:1}
+.ssc-crumbs{flex:1;min-width:0;display:flex;align-items:center;gap:2px;height:28px;padding:0 8px;border:.5px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-1);overflow-x:auto;overflow-y:hidden;white-space:nowrap;cursor:text;scrollbar-width:none}
+.ssc-crumbs::-webkit-scrollbar{display:none}
+.ssc-crumb-wrap{display:inline-flex;align-items:center;gap:2px;flex:none}
+.ssc-crumb-sep{color:var(--dsw-alias-label-secondary);font-size:11px;opacity:.7}
+.ssc-crumb{flex:none;padding:2px 5px;border:0;border-radius:5px;background:transparent;color:var(--dsw-alias-label-secondary);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;cursor:pointer;line-height:1.3}
+.ssc-crumb:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+/* The directory on screen reads as the current one, not as another link. */
+.ssc-crumb-on{color:var(--dsw-alias-label-primary);font-weight:600}
+.ssc-path-input{flex:1;min-width:0;height:28px;padding:0 8px;border:.5px solid var(--dsw-alias-brand-primary);border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;outline:none}
 .ssc-entry{display:flex;align-items:center;gap:10px;width:100%;padding:6px 10px;border:0;border-radius:7px;background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12.5px;text-align:left;cursor:pointer}
 .ssc-entry:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .ssc-entry-icon{flex:none;display:inline-flex;width:14px;height:14px;color:var(--dsw-alias-label-secondary)}
@@ -287,6 +297,9 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       'col.command': '命令',
       'col.gpu': 'GPU',
       'files.up': '上一级',
+      'files.home': '主目录',
+      'files.edit': '输入路径',
+      'files.pathHint': '输入绝对路径，或 ~ 开头的路径，回车跳转',
       'files.refresh': '刷新',
       'files.loading': '加载中…',
       'files.empty': '这个目录是空的',
@@ -357,6 +370,9 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       'col.command': 'Command',
       'col.gpu': 'GPU',
       'files.up': 'Up',
+      'files.home': 'Home directory',
+      'files.edit': 'Type a path',
+      'files.pathHint': 'An absolute path, or one starting with ~, then press Enter',
       'files.refresh': 'Refresh',
       'files.loading': 'Loading…',
       'files.empty': 'This directory is empty',
@@ -795,6 +811,34 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
     }
 
     /**
+     * Split an absolute path into one breadcrumb entry per level.
+     *
+     * Each entry carries the absolute path it stands for, which is what makes
+     * any level a single click away. When the path is inside the home directory
+     * the first entry is `~` rather than `/`, so a long `/home/<someone>` prefix
+     * does not eat the bar. The prefix test is on a separator boundary: `/home/a`
+     * must not be treated as an ancestor of `/home/ab`.
+     * @param path - the absolute path currently listed.
+     * @param home - the home directory, or an empty string when not yet known.
+     * @returns the entries, root first.
+     */
+    function buildCrumbs(path, home) {
+      const current = String(path).replace(/\/+$/u, '') || '/'
+      const underHome = home.length > 0 && (current === home || current.startsWith(`${home}/`))
+      const entries = underHome
+        ? [{ name: '~', path: home, full: home }]
+        : [{ name: '/', path: '/', full: '/' }]
+      const rest = underHome ? current.slice(home.length) : current
+      let accumulated = underHome ? home : ''
+      for (const part of rest.split('/')) {
+        if (part.length === 0) continue
+        accumulated = `${accumulated}/${part}`
+        entries.push({ name: part, path: accumulated, full: accumulated })
+      }
+      return entries
+    }
+
+    /**
      * The files tab: a read-only directory walk with a text preview.
      *
      * One of these is mounted per connected server and only the selected one is
@@ -812,6 +856,14 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       const [failure, setFailure] = React.useState('')
       const [preview, setPreview] = React.useState(null)
       const [previewLoading, setPreviewLoading] = React.useState(false)
+      // The home directory, learned from the first listing. Knowing it lets the
+      // address bar show `~` instead of `/home/<someone>` and keeps the
+      // breadcrumb short on the deep paths that actually need it.
+      const [home, setHome] = React.useState('')
+      const [editing, setEditing] = React.useState(false)
+      const [draft, setDraft] = React.useState('')
+      const inputRef = React.useRef(null)
+      const crumbsRef = React.useRef(null)
 
       const load = React.useCallback(async (next) => {
         setLoading(true)
@@ -820,6 +872,7 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
           const value = await call('listDir', { serverId, path: next })
           setListing(value)
           setPath(value.path)
+          setHome((current) => (current.length === 0 ? value.path : current))
         } catch (error) {
           setFailure(error instanceof Error ? error.message : String(error))
           setListing(null)
@@ -882,14 +935,134 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
         return parts.join('/') || '/'
       }, [path])
 
+      // The breadcrumb. Each crumb carries the absolute path it navigates to, so
+      // any level is one click away instead of one `cd ..` per level. The home
+      // directory is shown as `~`, which is both shorter than `/home/<someone>`
+      // and the form the address bar accepts.
+      const crumbs = React.useMemo(() => buildCrumbs(path, home), [path, home])
+
+      const beginEdit = React.useCallback(() => {
+        setDraft(path)
+        setEditing(true)
+      }, [path])
+
+      const cancelEdit = React.useCallback(() => {
+        setEditing(false)
+        setDraft('')
+      }, [])
+
+      const commitEdit = React.useCallback(() => {
+        const next = draft.trim()
+        setEditing(false)
+        setDraft('')
+        // An empty box or the path already shown is not a navigation; re-reading
+        // the same directory would only add a round trip for nothing.
+        if (next.length === 0 || next === path) return
+        setPreview(null)
+        void load(next)
+      }, [draft, path, load])
+
+      // Focus and select on entering edit mode, so typing replaces the path and
+      // Escape-then-reopen never leaves a stale selection.
+      React.useEffect(() => {
+        if (!editing) return
+        const input = inputRef.current
+        if (input === null || input === undefined) return
+        input.focus()
+        input.select()
+      }, [editing])
+
+      // A deep path overflows the bar; keep the crumb for the directory actually
+      // being shown in view rather than the root end.
+      React.useEffect(() => {
+        const bar = crumbsRef.current
+        if (bar === null || bar === undefined) return
+        bar.scrollLeft = bar.scrollWidth
+      }, [crumbs])
+
       return h('div', {
         className: 'ssc-files',
         style: visible ? undefined : { display: 'none' },
       },
       h('div', { className: 'ssc-path' },
-          h('button', { type: 'button', className: 'ssc-btn ssc-btn-quiet', onClick: () => void load(parentPath), disabled: loading }, t('files.up')),
-          h('span', { className: 'ssc-path-text', title: path }, path),
-          h('button', { type: 'button', className: 'ssc-btn ssc-btn-quiet', onClick: () => void load(path), disabled: loading }, t('files.refresh'))),
+          h('button', {
+            type: 'button',
+            className: 'ssc-btn ssc-btn-quiet ssc-path-btn',
+            onClick: () => void load(parentPath),
+            disabled: loading,
+            title: t('files.up'),
+            'aria-label': t('files.up'),
+          }, '↑'),
+          h('button', {
+            type: 'button',
+            className: 'ssc-btn ssc-btn-quiet ssc-path-btn',
+            onClick: () => void load('~'),
+            disabled: loading,
+            title: t('files.home'),
+            'aria-label': t('files.home'),
+          }, '~'),
+          editing
+            ? h('input', {
+              className: 'ssc-path-input',
+              ref: inputRef,
+              value: draft,
+              spellCheck: false,
+              autoComplete: 'off',
+              placeholder: t('files.pathHint'),
+              title: t('files.pathHint'),
+              'aria-label': t('files.edit'),
+              onChange: (event) => setDraft(event.target.value),
+              onKeyDown: (event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  commitEdit()
+                } else if (event.key === 'Escape') {
+                  event.preventDefault()
+                  cancelEdit()
+                }
+                // Keep the keystroke local. The only document-level Escape
+                // listener today belongs to the connect dialog, which cannot be
+                // open at the same time as a focusable address bar; this guards
+                // the intent rather than a live collision.
+                event.stopPropagation()
+              },
+              onBlur: cancelEdit,
+            })
+            : h('div', {
+              className: 'ssc-crumbs',
+              ref: crumbsRef,
+              onClick: beginEdit,
+              title: t('files.edit'),
+            },
+            crumbs.map((crumb, index) => h('span', { key: crumb.full, className: 'ssc-crumb-wrap' },
+              index === 0 ? null : h('span', { className: 'ssc-crumb-sep', 'aria-hidden': 'true' }, '›'),
+              h('button', {
+                type: 'button',
+                className: `ssc-crumb ${index === crumbs.length - 1 ? 'ssc-crumb-on' : ''}`,
+                onClick: (event) => {
+                  // The bar underneath opens the editor; a crumb click navigates.
+                  event.stopPropagation()
+                  if (crumb.path === path) return
+                  setPreview(null)
+                  void load(crumb.path)
+                },
+                title: crumb.full,
+              }, crumb.name)))),
+          h('button', {
+            type: 'button',
+            className: 'ssc-btn ssc-btn-quiet ssc-path-btn',
+            onClick: beginEdit,
+            title: t('files.edit'),
+            'aria-label': t('files.edit'),
+          }, '✎'),
+          h('button', {
+            type: 'button',
+            className: 'ssc-btn ssc-btn-quiet ssc-path-btn',
+            onClick: () => void load(path),
+            disabled: loading,
+            title: t('files.refresh'),
+            'aria-label': t('files.refresh'),
+          }, '⟳')),
         failure.length > 0 ? h('div', { className: 'ssc-hint ssc-fail', role: 'alert' }, failure) : null,
         loading && listing === null ? h('div', { className: 'ssc-empty' }, h('span', null, t('files.loading'))) : null,
         listing !== null && listing.entries.length === 0

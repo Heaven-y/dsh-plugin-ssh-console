@@ -334,6 +334,78 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   console.log('ok 10 - a tab switch keeps the file browser\'s place and never reconnects')
 }
 
+/* ---------------------------------------------------- navigating the file tree */
+
+{
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+
+  // Lift `buildCrumbs` verbatim and exercise it: the breadcrumb is the whole
+  // feature, so the path arithmetic is worth testing rather than asserting on
+  // its source text.
+  const start = source.indexOf('function buildCrumbs(')
+  assert.ok(start > 0, 'the breadcrumb builder exists')
+  let depth = 0
+  let end = source.indexOf('{', start)
+  for (; end < source.length; end += 1) {
+    if (source[end] === '{') depth += 1
+    else if (source[end] === '}') { depth -= 1; if (depth === 0) break }
+  }
+  const factory = new Function(`${source.slice(start, end + 1)} return buildCrumbs`)
+  const buildCrumbs = factory()
+
+  const names = (crumbs) => crumbs.map((crumb) => crumb.name)
+  const paths = (crumbs) => crumbs.map((crumb) => crumb.path)
+
+  // Every level is reachable in one click, and each entry knows its own path.
+  assert.deepEqual(names(buildCrumbs('/home/syz/project', '/home/syz')), ['~', 'project'],
+    'a path under home starts at ~')
+  assert.deepEqual(paths(buildCrumbs('/home/syz/project', '/home/syz')),
+    ['/home/syz', '/home/syz/project'], 'each crumb carries the path it navigates to')
+
+  // Outside home the root is the anchor instead.
+  assert.deepEqual(names(buildCrumbs('/etc/nginx/conf.d', '/home/syz')), ['/', 'etc', 'nginx', 'conf.d'],
+    'a path outside home starts at the root')
+  assert.deepEqual(paths(buildCrumbs('/etc/nginx', '/home/syz')), ['/', '/etc', '/etc/nginx'])
+
+  // The home directory itself is a single crumb, not `~` plus an empty tail.
+  assert.deepEqual(names(buildCrumbs('/home/syz', '/home/syz')), ['~'])
+  assert.deepEqual(names(buildCrumbs('/', '/home/syz')), ['/'])
+  assert.deepEqual(names(buildCrumbs('/', '')), ['/'])
+
+  // A sibling whose name merely starts with the home directory's name is not
+  // inside it. Without the separator check, `/home/syz2` would render as `~2`.
+  assert.deepEqual(names(buildCrumbs('/home/syz2/data', '/home/syz')), ['/', 'home', 'syz2', 'data'],
+    'the home prefix test respects the separator boundary')
+
+  // A trailing slash must not produce an empty final crumb.
+  assert.deepEqual(names(buildCrumbs('/var/log/', '/home/syz')), ['/', 'var', 'log'])
+
+  // The bar is an editor as well: the address is a real input, so a deep path
+  // can be typed instead of walked. Enter commits, Escape and blur abandon.
+  const bar = source.slice(source.indexOf('function FilesTab('), source.indexOf('function TerminalPane('))
+  assert.ok(/className: 'ssc-path-input'/u.test(bar), 'the address bar becomes an input while editing')
+  assert.ok(/event\.key === 'Enter'/u.test(bar), 'Enter navigates')
+  assert.ok(/event\.key === 'Escape'/u.test(bar), 'Escape cancels')
+  assert.ok(/onBlur: cancelEdit/u.test(bar), 'clicking away abandons the edit rather than navigating')
+  assert.ok(/event\.stopPropagation\(\)/u.test(bar),
+    'typing Escape in the box does not leak to a document-level handler')
+  assert.ok(/if \(next\.length === 0 \|\| next === path\) return/u.test(bar),
+    're-submitting the same path costs no SSH round trip')
+  assert.ok(/void load\('~'\)/u.test(bar), 'the home button jumps to the home directory')
+  assert.ok(/setHome\(\(current\) => \(current\.length === 0 \? value\.path : current\)\)/u.test(bar),
+    'home is learned from the first listing, not guessed')
+
+  // And every crumb is a button, so a click navigates to that level.
+  assert.ok(/crumb\.path === path\) return/u.test(bar), 'clicking the current level is a no-op')
+  assert.ok(/void load\(crumb\.path\)/u.test(bar), 'clicking a crumb navigates to it')
+
+  // The new labels exist in both languages.
+  for (const key of ['files.home', 'files.edit', 'files.pathHint']) {
+    assert.ok(source.includes(`'${key}'`), `${key} is present in both dictionaries`)
+  }
+  console.log('ok 11 - the address bar accepts a typed path and every breadcrumb level is one click')
+}
+
 /* --------------------------------------------------- gauges and the dialog */
 
 {
@@ -362,7 +434,7 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   const page = bodyOf('SshConsolePage')
   assert.ok(page.includes('connectorDialog'), 'the page renders the dialog')
   assert.ok(!page.includes('ssc-connector-row'), 'the connector no longer inlines above the tabs')
-  console.log('ok 11 - each GPU gauge tracks its own metric and the connector is a dialog')
+  console.log('ok 12 - each GPU gauge tracks its own metric and the connector is a dialog')
 }
 
 /* ------------------------------------------------- full command, never cut */
@@ -392,7 +464,7 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   assert.ok(/td\.ssc-cmd\{[^}]*white-space:normal/u.test(css), 'the command cell wraps instead of clipping')
   assert.ok(/td\.ssc-cmd\{[^}]*overflow-wrap:anywhere/u.test(css), 'a long path can break mid-token')
   assert.ok(!/ssc-table-wide\{min-width:8\d\dpx\}/u.test(css), 'the table no longer forces an 860px floor')
-  console.log('ok 12 - the process tables show the full command line')
+  console.log('ok 13 - the process tables show the full command line')
 }
 
 /* ------------------------------------------------------- terminal lifecycle */
@@ -508,7 +580,7 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   assert.ok(/FALLBACK_TERM_SIZE/u.test(pane), 'an unmeasurable pane opens at a sane default instead of 2x1')
   assert.ok(/if \(!readyRef\.current\) return/u.test(pane),
     'no resize happens before the first screen is drawn')
-  console.log('ok 13 - the renderer stylesheet is installed and a collapsed fit is never believed')
+  console.log('ok 14 - the renderer stylesheet is installed and a collapsed fit is never believed')
 
   /* ------------------------------------------ closing one keeps the other */
 
@@ -527,7 +599,7 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
     'closing removes the pane id')
   assert.ok(!/setTermIds\(\(current\) => \{[\s\S]*?setPanes/u.test(close[1]),
     'one state update does not nest inside the other')
-  console.log('ok 14 - the terminal opens itself, keeps its session, splits and shows no hint')
+  console.log('ok 15 - the terminal opens itself, keeps its session, splits and shows no hint')
 }
 
 console.log('\nall client harness checks passed')
