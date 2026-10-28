@@ -131,6 +131,8 @@ node test/panes.test.mjs       # 分屏状态机：3 项
 
 ## 发布
 
+> **发版由人决定。** 改完代码先问一句要不要发，不要自己顺手发。详见 [RELEASING.md](RELEASING.md)。
+
 发版只有一条命令，前提是工作区干净且在 `main` 上：
 
 ```sh
@@ -146,6 +148,8 @@ npm run release minor --dry-run   # 只看会做什么，不打标签
 4. 用该标签创建 GitHub Release。
 
 所以「发版 = 推一个标签」，没有第二步会忘，也没有凭据落在本地。
+
+**普通提交不会发版**：push 到 `main` 只触发 [`test.yml`](.github/workflows/test.yml) 跑测试，`publish.yml` 只认 `v*` 标签。
 
 **鉴权用哪条路：**
 
