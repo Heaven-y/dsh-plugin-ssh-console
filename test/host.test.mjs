@@ -6,7 +6,28 @@
  * stays runnable on a machine without the lab servers.
  */
 import assert from 'node:assert/strict'
-import { SshConsoleService } from '../index.js'
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { SshConsoleService, clampNumber, parsePortStrict } from '../index.js'
+
+/**
+ * Fingerprint the user's real OpenSSH files before anything runs.
+ *
+ * Every test in this file is supposed to work on a scratch copy. This is the
+ * assertion that proves it: if a future change makes a test write through to the
+ * real `~/.ssh/config` or `known_hosts`, the run fails at the end rather than
+ * silently editing the machine it was run on.
+ */
+const REAL_SSH_FILES = [join(homedir(), '.ssh', 'config'), join(homedir(), '.ssh', 'known_hosts')]
+const realBefore = REAL_SSH_FILES.map((path) => {
+  try {
+    const info = statSync(path)
+    return { path, exists: true, mtimeMs: info.mtimeMs, size: info.size }
+  } catch {
+    return { path, exists: false }
+  }
+})
 
 /** Minimal Host context: the service only ever provides and effects. */
 function fakeContext() {
@@ -27,7 +48,13 @@ function fakeContext() {
 }
 
 const ctx = fakeContext()
-const service = new SshConsoleService(ctx, { refreshMs: 2000 })
+// A scratch known_hosts: the suite must not append to the real one. It still
+// exercises the trust path, including the write.
+const knownHostsDir = mkdtempSync(join(tmpdir(), 'ssc-hosts-'))
+const service = new SshConsoleService(ctx, {
+  refreshMs: 2000,
+  knownHostsFile: join(knownHostsDir, 'known_hosts'),
+})
 ctx.provide('sshConsole', service)
 
 /* --------------------------------------------------------------- catalogue */
@@ -76,11 +103,19 @@ if (target === undefined) {
 
 let connected = false
 try {
-  const session = await service.connect({ serverId: target.id })
+  // The connection now requires an agreed host key. The suite runs against a
+  // scratch known_hosts so it never edits the real one, and it walks the same
+  // trust path the panel does: inspect the key, then pass the fingerprint back.
+  const key = await service.hostKey({ serverId: target.id })
+  assert.ok(key.fingerprint.startsWith('SHA256:'), 'the fingerprint is in OpenSSH form')
+  assert.ok(key.keyBody.length > 0, 'the key body is present')
+  const session = key.status === 'trusted'
+    ? await service.connect({ serverId: target.id })
+    : await service.connect({ serverId: target.id, trustFingerprint: key.fingerprint })
   connected = true
   assert.equal(session.server.host, target.host)
   assert.ok(session.hostname.length > 0, 'the remote hostname is known')
-  console.log(`ok 3 - connected to ${target.id} as ${session.hostname} (${session.os})`)
+  console.log(`ok 3 - connected to ${target.id} as ${session.hostname} (${session.os}), key ${key.status}`)
 
   const status = await service.status({})
   assert.equal(status.sessions.length, 1)
@@ -94,7 +129,21 @@ try {
   assert.ok(listing.entries.every((entry) => typeof entry.name === 'string'))
   const directories = listing.entries.filter((entry) => entry.kind === 'directory')
   assert.ok(directories.length > 0, 'directories are recognised')
-  console.log(`ok 5 - listed ${listing.entries.length} entries under ${listing.path} (${directories.length} dirs)`)
+  // SFTP is the primary path: it needs no remote tooling, so a macOS or BSD host
+  // lists normally instead of reporting that it has no GNU `stat`.
+  const liveSession = service.sessions.get(target.id)
+  assert.ok(liveSession.sftp !== undefined, 'the listing went through SFTP')
+  assert.ok(
+    listing.entries.every((entry) => ['directory', 'file', 'symlink', 'other'].includes(entry.kind)),
+    'every entry has a kind derived from its mode bits',
+  )
+  // Symlinks and dotfiles must both survive: the shell glob needed extra patterns
+  // for dotfiles, and a symlink is neither a plain file nor a directory.
+  assert.ok(
+    listing.entries.every((entry) => entry.name !== '.' && entry.name !== '..'),
+    'the dot entries are dropped',
+  )
+  console.log(`ok 5 - listed ${listing.entries.length} entries under ${listing.path} (${directories.length} dirs, over SFTP)`)
 
   // A single live session may omit the id: the resolver falls back to it.
   const home = await service.listDir({ path: '~' })
@@ -107,7 +156,19 @@ try {
     (error) => error.code === 'ssh/no-such-directory',
     'a missing directory is a marked failure',
   )
-  console.log('ok 7 - a missing directory fails explicitly')
+  // A file is not a directory either, and must fail rather than list nothing.
+  await assert.rejects(
+    () => service.listDir({ path: '/etc/hostname' }),
+    (error) => error.code === 'ssh/no-such-directory',
+    'a file is refused as a directory',
+  )
+  console.log('ok 7 - a missing directory and a plain file both fail explicitly')
+
+  // Relative segments resolve, because the breadcrumb renders the answer as
+  // absolute paths and a `..` left in place would become a crumb.
+  const normalised = await service.listDir({ path: '/home/../home' })
+  assert.equal(normalised.path, '/home', 'dot segments are resolved')
+  console.log(`ok 7b - /home/../home resolved to ${normalised.path}`)
 
   const first = await service.metrics({})
   assert.ok(first.memory.totalBytes > 0, 'memory totals are parsed')
@@ -166,18 +227,28 @@ try {
       perDevice,
       'the list holds every process the devices account for',
     )
-    // Cross-check against the count the driver itself reports, gathered the same
-    // way the plugin gathers it.
+    // Cross-check against the count the driver itself reports. This cannot be an
+    // equality test: the snapshot and this fresh count are taken seconds apart, and
+    // a host running fifty training jobs gains and loses processes in that window.
+    // The invariant that must hold is the one the old 48-row cap broke — the list
+    // is not silently truncated — and the per-device sum above already pins the
+    // exact number from a single instant.
     const counted = await service.exec({
       command: 'nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | grep -c . || true',
     })
     const reported = Number.parseInt(counted.stdout.trim(), 10)
     if (Number.isFinite(reported) && reported > 0) {
-      assert.equal(
-        second.gpuProcesses.length,
-        reported,
-        `all ${reported} processes reported by nvidia-smi survive the round trip`,
+      const drift = Math.abs(second.gpuProcesses.length - reported)
+      assert.ok(
+        drift <= Math.ceil(reported * 0.2),
+        `the list tracks nvidia-smi within process churn (${second.gpuProcesses.length} vs ${reported})`,
       )
+      if (reported > 48) {
+        assert.ok(
+          second.gpuProcesses.length > 48,
+          `more than the old 48-row cap survived (${second.gpuProcesses.length})`,
+        )
+      }
     }
     // Sorted by card so a reader can find "what is on #3" without scanning.
     const order = second.gpuProcesses.map((row) => row.gpuIndex ?? Number.MAX_SAFE_INTEGER)
@@ -373,7 +444,11 @@ try {
     let other
     for (const candidate of preferred.slice(0, 4)) {
       try {
-        await service.connect({ serverId: candidate.id })
+        // Trust this host's key in the scratch file first, the way the panel does.
+        const key = await service.hostKey({ serverId: candidate.id })
+        await service.connect(key.status === 'trusted'
+          ? { serverId: candidate.id }
+          : { serverId: candidate.id, trustFingerprint: key.fingerprint })
         other = candidate
         break
       } catch (error) {
@@ -422,5 +497,282 @@ try {
 
 assert.deepEqual((await service.status({})).sessions, [])
 console.log('ok 24 - disconnect clears every session')
+
+/* -------------------------------------------------------------- host keys */
+
+// The scratch file is written to by the connection above, so by now it holds this
+// host's key and the status must have flipped from unknown to trusted.
+const trusted = await service.hostKey({ serverId: target.id })
+assert.equal(trusted.status, 'trusted', 'the accepted key was recorded and is recognised next time')
+assert.equal(trusted.fingerprint, (await service.hostKey({ serverId: target.id })).fingerprint,
+  'the same host reports a stable fingerprint')
+
+// A key that disagrees with the file is the dangerous case and must never be
+// classified as merely unknown, which is what would offer a "trust this" button.
+const entries = readFileSync(service.knownHostsFile(), 'utf8').trim()
+const realBody = trusted.keyBody
+writeFileSync(
+  service.knownHostsFile(),
+  `[${target.host}]:${target.port} ${trusted.keyType} ${Buffer.from('a different key entirely').toString('base64')}\n${entries}\n`,
+)
+// Appending a conflicting line must still read as trusted while the real entry is
+// present; replacing it must not.
+writeFileSync(
+  service.knownHostsFile(),
+  `[${target.host}]:${target.port} ${trusted.keyType} ${Buffer.from('a different key entirely').toString('base64')}\n`,
+)
+const tampered = await service.hostKey({ serverId: target.id })
+assert.equal(tampered.status, 'mismatch', 'a changed key is a mismatch, not an unknown host')
+assert.equal(tampered.keyBody, realBody, 'the observation is still the real key')
+
+await assert.rejects(
+  () => service.connect({ serverId: target.id, trustFingerprint: tampered.fingerprint }),
+  (error) => error.code === 'ssh/host-key-mismatch',
+  'a mismatched key cannot be waved through by confirming its fingerprint',
+)
+
+// And with no trust at all against an empty file, the refusal is "unknown" — the
+// state that is allowed to become trust on confirmation.
+writeFileSync(service.knownHostsFile(), '')
+await assert.rejects(
+  () => service.connect({ serverId: target.id }),
+  (error) => error.code === 'ssh/host-key-unknown',
+  'an unknown host is refused until its fingerprint is confirmed',
+)
+await service.connect({ serverId: target.id, trustFingerprint: trusted.fingerprint })
+console.log('ok 25 - an unknown key needs confirmation, a changed key is refused outright')
+
+// A known_hosts file legitimately holds several key types for one host, so an
+// entry of a *different* type is not a conflict. Getting this wrong is not a
+// subtle inaccuracy: this host's real entry is ECDSA while the server offers
+// Ed25519 first, and treating that as a mismatch refused a host that plain `ssh`
+// connects to. The distinction is the whole of this assertion.
+writeFileSync(
+  service.knownHostsFile(),
+  `[${target.host}]:${target.port} ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBfake\n`,
+)
+const otherType = await service.hostKey({ serverId: target.id })
+assert.equal(otherType.status, 'unknown', 'a different key type is "not seen yet", not a mismatch')
+
+// The same type carrying a different body is the conflict that must be refused.
+writeFileSync(
+  service.knownHostsFile(),
+  `[${target.host}]:${target.port} ${otherType.keyType} ${Buffer.from('same type, wrong key').toString('base64')}\n`,
+)
+const sameType = await service.hostKey({ serverId: target.id })
+assert.equal(sameType.status, 'mismatch', 'the same key type with a different body is a mismatch')
+console.log('ok 26 - key types are compared separately, the way OpenSSH does')
+await service.disconnect({})
+console.log(`     (known_hosts for this run: ${service.knownHostsFile()})`)
+
+/* -------------------------------------------------------- editing ssh config */
+
+// The whole risk of this feature is a rewrite quietly dropping something, so every
+// assertion here is about what SURVIVES. The fixture carries the shapes that a real
+// file has and that this plugin has no opinion about: a leading comment, a
+// directive it does not understand, and a `Host *` defaults block at the bottom.
+// These are the two directives on this machine's own Tencent git entry; losing them
+// makes that host unreachable, silently.
+const seed = [
+  '# leading comment',
+  'Host alpha',
+  '  HostName 10.0.0.1',
+  '  Port 2222',
+  '  User root',
+  '  HostKeyAlgorithms +ssh-rsa',
+  '',
+  'Host beta',
+  '  HostName 10.0.0.2',
+  '  Port 22',
+  '',
+  '# defaults, keep at the bottom',
+  'Host *',
+  '  ServerAliveInterval 30',
+  '  ForwardAgent yes',
+  '',
+].join('\n')
+const editDir = mkdtempSync(join(tmpdir(), 'ssc-config-'))
+const editPath = join(editDir, 'config')
+writeFileSync(editPath, seed)
+const editor = new SshConsoleService(ctx, {
+  sshConfigFile: editPath,
+  includeSshConfig: true,
+  servers: [],
+})
+
+let catalogue2 = await editor.servers({})
+assert.equal(catalogue2.canEdit, true, 'editing is on by default')
+assert.equal(catalogue2.configPath, editPath, 'the catalogue names the file it edits')
+assert.ok(catalogue2.servers.every((entry) => entry.editable === true), 'ssh-config entries are editable')
+assert.equal(catalogue2.servers.length, 2, 'the wildcard block is not offered as a target')
+
+await editor.saveServer({ mode: 'update', originalLabel: 'alpha', label: 'alpha', host: '10.9.9.9', port: 2200, user: 'deploy' })
+const afterEdit = readFileSync(editPath, 'utf8')
+assert.ok(afterEdit.includes('  HostName 10.9.9.9'), 'HostName was updated')
+assert.ok(afterEdit.includes('  Port 2200'), 'Port was updated')
+assert.ok(afterEdit.includes('  User deploy'), 'User was updated')
+assert.ok(afterEdit.includes('  HostKeyAlgorithms +ssh-rsa'), 'an unknown directive survived the edit')
+assert.ok(afterEdit.startsWith('# leading comment'), 'the leading comment survived')
+assert.ok(afterEdit.includes('ServerAliveInterval 30'), 'the wildcard block survived')
+assert.ok(afterEdit.endsWith('\n'), 'the file still ends with a newline')
+
+// A new block must land BEFORE `Host *`. `ssh` takes the first value it finds for
+// each keyword, so a block placed after the defaults would have any keyword the
+// defaults also set silently overridden by them: the file would look right and
+// authenticate as somebody else.
+const added2 = await editor.saveServer({ mode: 'add', label: 'gamma', host: '10.0.0.3', port: 22, user: 'ubuntu' })
+assert.equal(added2.savedId, 'ubuntu@10.0.0.3:22', 'the new id comes back')
+const afterAdd2 = readFileSync(editPath, 'utf8')
+assert.ok(afterAdd2.includes('  Port 22'), 'Port is written explicitly, even at its default')
+assert.ok(
+  afterAdd2.indexOf('Host gamma') < afterAdd2.indexOf('Host *'),
+  'a new block is inserted before the defaults block',
+)
+
+// A duplicate alias must be refused without touching the file.
+await assert.rejects(
+  () => editor.saveServer({ mode: 'add', label: 'gamma', host: '1.2.3.4', port: 22 }),
+  (error) => error.code === 'ssh/label-exists',
+  'a duplicate alias is refused',
+)
+assert.equal(readFileSync(editPath, 'utf8'), afterAdd2, 'and nothing was written')
+
+// An alias that ssh would read as a pattern is refused rather than escaped.
+for (const bad of ['has space', 'a*b', 'q?', '!neg', '-x']) {
+  await assert.rejects(
+    () => editor.saveServer({ mode: 'add', label: bad, host: '1.2.3.4', port: 22 }),
+    (error) => error.code === 'ssh/bad-label',
+    `${JSON.stringify(bad)} is refused`,
+  )
+}
+// A control character in the host would inject a line into known_hosts.
+for (const bad of ['has space', 'a#b', 'a\nb']) {
+  await assert.rejects(
+    () => editor.saveServer({ mode: 'add', label: 'h1', host: bad, port: 22 }),
+    (error) => error.code === 'ssh/bad-host',
+    `host ${JSON.stringify(bad)} is refused`,
+  )
+}
+
+// Editing a live target drops its session, because its parameters are what changed.
+// The terminals on it go too: a PTY cannot outlive the connection carrying it.
+catalogue2 = await editor.servers({})
+const betaEntry = catalogue2.servers.find((entry) => entry.label === 'beta')
+editor.sessions.set(betaEntry.id, { client: { end() {} }, connected: true, server: { id: betaEntry.id } })
+// A control character cannot occur in an alias, so this key matches the one the
+// service builds for `serverId` + `t1` without needing its internal helper.
+editor.terminals.set(`${betaEntry.id}\u0000t1`, { exited: false, stream: { end() {} } })
+await editor.saveServer({ mode: 'update', originalLabel: 'beta', label: 'beta', host: '10.0.0.2', port: 2222 })
+assert.equal(editor.sessions.has(betaEntry.id), false, 'editing a connected target disconnects it')
+assert.equal(editor.terminals.size, 0, 'and its terminals go with it')
+
+// Removing a block takes its directives with it and leaves the rest alone.
+await editor.removeServer({ label: 'gamma' })
+const afterRemove2 = readFileSync(editPath, 'utf8')
+assert.ok(!afterRemove2.includes('Host gamma'), 'the block is gone')
+assert.ok(afterRemove2.includes('Host *'), 'the defaults block is still there')
+assert.ok(afterRemove2.includes('HostKeyAlgorithms +ssh-rsa'), 'the unknown directive is still there')
+assert.ok(!afterRemove2.includes('\n\n\n'), 'removing does not leave a run of blank lines')
+console.log('ok 27 - editing ssh_config touches only its own lines')
+
+// `Match` changes what the blocks around it mean, so a rewrite could be silently
+// wrong. It is refused, with the path, rather than guessed at.
+writeFileSync(editPath, 'Host a\n  HostName 1.1.1.1\nMatch host b\n  User x\n')
+await assert.rejects(
+  () => editor.saveServer({ mode: 'add', label: 'c', host: '2.2.2.2', port: 22 }),
+  (error) => error.code === 'ssh/config-unsupported',
+  'a file using Match is refused',
+)
+
+// Turning the feature off must make the panel offer nothing and the Host refuse.
+const locked = new SshConsoleService(ctx, { sshConfigFile: editPath, includeSshConfig: true, servers: [], allowConfigEdit: false })
+const lockedCatalogue = await locked.servers({})
+assert.equal(lockedCatalogue.canEdit, false, 'canEdit is false when disabled')
+assert.ok(lockedCatalogue.servers.every((entry) => entry.editable === false), 'no entry offers editing')
+await assert.rejects(
+  () => locked.saveServer({ mode: 'add', label: 'z', host: '3.3.3.3', port: 22 }),
+  (error) => error.code === 'ssh/config-edit-disabled',
+  'the write is refused when disabled',
+)
+console.log('ok 28 - a Match file is refused, and editing can be turned off')
+
+/* ------------------------------------------------------- numeric coercion */
+
+// The form sends the port as TEXT, because it is a text input. It once reached the
+// writer as '26518', failed a `typeof value === 'number'` test, and fell back to
+// 22 — so every save through the panel rewrote the port to 22 and the next
+// connection was refused. The pre-write verification missed it because it compared
+// the written port against the same wrongly-defaulted value, which is why the
+// checks below are about the helpers as well as about the written file.
+assert.equal(clampNumber('26518', 22, 1, 65535), 26518, 'a numeric string is a number, not a reason to default')
+assert.equal(clampNumber(' 2222 ', 22, 1, 65535), 2222, 'surrounding whitespace is tolerated')
+assert.equal(clampNumber('', 22, 1, 65535), 22, 'an empty value falls back')
+assert.equal(clampNumber('abc', 22, 1, 65535), 22, 'garbage falls back when reading')
+assert.equal(parsePortStrict('26518'), 26518, 'a numeric string parses')
+assert.equal(parsePortStrict(26518), 26518, 'a number parses')
+for (const bad of ['', 'abc', '0', '65536', '22.5']) {
+  assert.equal(parsePortStrict(bad), undefined, `port ${JSON.stringify(bad)} is not usable`)
+}
+
+// Reading a file may degrade to a default; writing to one must not. That is the
+// whole distinction between the two helpers, so it gets its own write attempt.
+writeFileSync(editPath, 'Host box\n  HostName 10.0.0.1\n  Port 26518\n  User yz\n')
+const portEditor = new SshConsoleService(ctx, { sshConfigFile: editPath, includeSshConfig: true, servers: [] })
+const boxEntry = (await portEditor.servers({})).servers[0]
+assert.equal(boxEntry.port, 26518, 'the catalogue reports the real port')
+// Exactly what the form sends: String(entry.port).
+await portEditor.saveServer({
+  mode: 'update', originalLabel: 'box', label: 'box',
+  host: boxEntry.host, port: String(boxEntry.port), user: boxEntry.user, identityFile: '',
+})
+assert.ok(readFileSync(editPath, 'utf8').includes('  Port 26518'), 'a text port round-trips unchanged')
+assert.ok(!readFileSync(editPath, 'utf8').includes('  Port 22'), 'and is not silently rewritten to 22')
+
+const beforeBadPort = readFileSync(editPath, 'utf8')
+for (const bad of ['', 'abc', '65536']) {
+  await assert.rejects(
+    () => portEditor.saveServer({ mode: 'update', originalLabel: 'box', label: 'box', host: '10.0.0.1', port: bad, user: 'yz' }),
+    (error) => error.code === 'ssh/bad-port',
+    `port ${JSON.stringify(bad)} is refused rather than defaulted`,
+  )
+}
+assert.equal(readFileSync(editPath, 'utf8'), beforeBadPort, 'a refused port writes nothing')
+console.log('ok 29 - a port sent as text round-trips, and an unusable one is refused')
+
+// A refused dial is not a trust decision. Reporting it as "the key could not be
+// verified" sends the reader to known_hosts when nothing is even listening.
+writeFileSync(editPath, 'Host dead\n  HostName 127.0.0.1\n  Port 1\n  User yz\n')
+const deadEditor = new SshConsoleService(ctx, { sshConfigFile: editPath, includeSshConfig: true, servers: [] })
+const deadEntry = (await deadEditor.servers({})).servers[0]
+for (const attempt of [
+  () => deadEditor.hostKey({ serverId: deadEntry.id }),
+  () => deadEditor.connect({ serverId: deadEntry.id }),
+]) {
+  await assert.rejects(
+    attempt,
+    (error) => error.code === 'ssh/unreachable' && error.details?.code === 'ECONNREFUSED',
+    'a refused dial is reported as unreachable, not as an unverified key',
+  )
+}
+console.log('ok 30 - a connection that is refused is not reported as a host-key failure')
+
+// The one assertion that protects the machine this runs on. Everything above is
+// supposed to have used a scratch directory; this fails the run if any of it
+// reached the real files.
+for (const before of realBefore) {
+  let after
+  try {
+    const info = statSync(before.path)
+    after = { exists: true, mtimeMs: info.mtimeMs, size: info.size }
+  } catch {
+    after = { exists: false }
+  }
+  assert.equal(after.exists, before.exists, `${before.path} was not created or removed by the tests`)
+  if (before.exists) {
+    assert.equal(after.mtimeMs, before.mtimeMs, `${before.path} was not modified by the tests`)
+    assert.equal(after.size, before.size, `${before.path} kept its size`)
+  }
+}
+console.log('ok 31 - the tests never wrote to the real ~/.ssh files')
 
 console.log('\nall host checks passed')

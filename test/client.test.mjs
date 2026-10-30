@@ -55,6 +55,51 @@ globalThis.document = documentStub
 const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
 new Function('window', 'document', source)(globalThis.window, documentStub)
 
+/**
+ * Extract one top-level `function name(...) { ... }` by brace matching.
+ *
+ * The earlier version cut at the first `\n    }`, which silently assumed the
+ * enclosing indentation and that the parameter list fits on one line. Wrapping the
+ * parameter list of `Connector` was enough to make every assertion about that
+ * component read a fragment of its signature instead of its body — and the failures
+ * pointed at the feature rather than at the helper.
+ *
+ * Counting braces fixes that but introduces its own trap: a destructured parameter
+ * (`function FilesTab({ serverId, t, visible })`) opens and closes a brace BEFORE
+ * the body does, so a naive count finishes at the parameter list and returns 42
+ * characters. The opening brace of the body is the one after the parameter list
+ * closes, so it is located explicitly by tracking parenthesis depth first.
+ * @param text - the source to search.
+ * @param name - the function to extract.
+ * @returns the function's full text.
+ */
+function blockOf(text, name) {
+  const start = text.indexOf(`function ${name}(`)
+  assert.ok(start > 0, `${name} exists`)
+  // Walk the parameter list: parentheses may nest (defaults, arrow callbacks) but
+  // braces inside them belong to destructuring, not to the body.
+  let parens = 0
+  let bodyStart = -1
+  for (let index = text.indexOf('(', start); index < text.length; index += 1) {
+    const char = text[index]
+    if (char === '(') parens += 1
+    else if (char === ')') {
+      parens -= 1
+      if (parens === 0) { bodyStart = text.indexOf('{', index); break }
+    }
+  }
+  assert.ok(bodyStart > 0, `${name} has a body`)
+  let depth = 0
+  for (let index = bodyStart; index < text.length; index += 1) {
+    if (text[index] === '{') depth += 1
+    else if (text[index] === '}') {
+      depth -= 1
+      if (depth === 0) return text.slice(start, index + 1)
+    }
+  }
+  assert.fail(`${name} is unterminated`)
+}
+
 const PKG = 'dsh-plugin-ssh-console'
 assert.equal(registered.id, PKG, 'the factory registers under the package name')
 
@@ -155,9 +200,20 @@ assert.equal(mounts.length, 1, 'one contribution is mounted')
 assert.equal(contribution.package, PKG)
 const methods = contribution.descriptors.map((descriptor) => descriptor.method)
 assert.deepEqual(methods, [
-  'servers', 'connect', 'disconnect', 'status', 'listDir', 'readText', 'metrics', 'exec',
+  'servers', 'connect', 'disconnect', 'status', 'hostKey', 'saveServer', 'removeServer',
+  'listDir', 'readText', 'metrics', 'exec',
   'termOpen', 'termList', 'termRead', 'termWrite', 'termResize', 'termClose',
 ])
+// The two halves must agree exactly, and the check has to read the Host's own list
+// rather than a copy written here. A hardcoded list is what let `hostKey` ship with
+// a Host implementation, a client call site and no mounted descriptor: the panel
+// then failed at runtime with "SSH service has no method hostKey" while this test
+// passed, because the expectation and reality had drifted together.
+const hostSource = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+const declared = /const REMOTE_METHODS = Object\.freeze\(\[([\s\S]*?)\]\)/u.exec(hostSource)
+assert.ok(declared !== null, 'the Host declares its Remote method list')
+const hostMethods = [...declared[1].matchAll(/'([\w]+)'/gu)].map((match) => match[1])
+assert.deepEqual(methods, hostMethods, 'the mounted descriptors match the Host method list exactly')
 for (const descriptor of contribution.descriptors) {
   assert.equal(descriptor.service, 'sshConsole')
   assert.equal(descriptor.namespace, 'sshConsole')
@@ -172,7 +228,18 @@ for (const descriptor of contribution.descriptors) {
 const ids = contribution.descriptors.map((descriptor) => descriptor.id)
 assert.equal(new Set(ids).size, ids.length, 'every endpoint id is unique')
 assert.deepEqual(injected, [['remote.sshConsole']], 'the namespace is bound through ctx.inject, not ctx.get')
-console.log('ok 3 - fourteen Remote descriptors match the Host SRC signature')
+
+// Every method the Client actually calls at runtime must be one it mounted.
+//
+// This is the check that would have caught the host-key bug directly, from the
+// other direction: `call('hostKey', …)` existed, was reachable, and the descriptor
+// was never mounted, so the panel failed with "SSH service has no method hostKey".
+// Comparing the two lists catches an omission; scanning the call sites catches it
+// even when the Host has no such method at all.
+const callSites = [...source.matchAll(/call\('(\w+)',/gu)].map((match) => match[1])
+const unmounted = [...new Set(callSites)].filter((name) => !methods.includes(name))
+assert.deepEqual(unmounted, [], `every call() target is mounted (unmounted: ${unmounted.join(', ')})`)
+console.log(`ok 3 - ${methods.length} Remote descriptors match the Host method list one for one`)
 
 /* ------------------------------------------------------------------ slots */
 
@@ -416,7 +483,7 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
     'typing Escape in the box does not leak to a document-level handler')
   assert.ok(/if \(next\.length === 0 \|\| next === path\) return/u.test(bar),
     're-submitting the same path costs no SSH round trip')
-  assert.ok(/void load\('~'\)/u.test(bar), 'the home button jumps to the home directory')
+  assert.ok(/void load\('~', 'push'\)/u.test(bar), 'the home button jumps to the home directory')
   // The breadcrumb no longer needs the home directory: it spells out the real
   // path. Keeping the state around would only invite the collapsing behaviour
   // back, so its absence is asserted rather than its shape.
@@ -424,13 +491,127 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
 
   // And every crumb is a button, so a click navigates to that level.
   assert.ok(/crumb\.path === path\) return/u.test(bar), 'clicking the current level is a no-op')
-  assert.ok(/void load\(crumb\.path\)/u.test(bar), 'clicking a crumb navigates to it')
+  assert.ok(/void load\(crumb\.path, 'push'\)/u.test(bar), 'clicking a crumb navigates to it')
 
   // The new labels exist in both languages.
-  for (const key of ['files.home', 'files.edit', 'files.pathHint']) {
+  for (const key of ['files.home', 'files.edit', 'files.pathHint', 'files.back', 'files.forward']) {
     assert.ok(source.includes(`'${key}'`), `${key} is present in both dictionaries`)
   }
   console.log('ok 11 - the address bar accepts a typed path and every breadcrumb level is one click')
+}
+
+/* ------------------------------------------------------------ browsing history */
+
+{
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+
+  // Lift the two history rules and run them. Back/Forward correctness lives
+  // entirely in this arithmetic, so it is executed rather than pattern-matched.
+  const lift = (name) => {
+    const start = source.indexOf(`function ${name}(`)
+    assert.ok(start > 0, `${name} exists`)
+    let depth = 0
+    let end = source.indexOf('{', start)
+    for (; end < source.length; end += 1) {
+      if (source[end] === '{') depth += 1
+      else if (source[end] === '}') { depth -= 1; if (depth === 0) break }
+    }
+    return source.slice(start, end + 1)
+  }
+  const constOf = (name) => {
+    const match = new RegExp(`const ${name} = [^\\n]+\\n`, 'u').exec(source)
+    assert.ok(match !== null, `${name} is defined`)
+    return match[0]
+  }
+  const pushHistory = new Function(
+    `${constOf('MAX_HISTORY')}${lift('pushHistory')} return pushHistory`,
+  )()
+
+  // A fresh tab has nowhere to go in either direction.
+  const empty = { entries: [], index: -1 }
+  assert.deepEqual(pushHistory(empty, '/home/yz'), { entries: ['/home/yz'], index: 0 })
+  assert.equal(empty.index, -1, 'the input is not mutated')
+
+  // Each new directory appends and advances the cursor.
+  let h = pushHistory({ entries: ['/a'], index: 0 }, '/a/b')
+  assert.deepEqual(h, { entries: ['/a', '/a/b'], index: 1 })
+  h = pushHistory(h, '/a/b/c')
+  assert.deepEqual(h, { entries: ['/a', '/a/b', '/a/b/c'], index: 2 })
+
+  // Re-reading the directory already at the cursor is a refresh, not a step, so
+  // it must not fill the history with repeats.
+  const same = pushHistory(h, '/a/b/c')
+  assert.equal(same, h, 'a refresh returns the same object, adding nothing')
+
+  // Navigating away from a rewound position discards what was ahead of it, the
+  // way every browser does: the user chose not to go there.
+  const rewound = { entries: ['/a', '/a/b', '/a/b/c'], index: 1 }
+  assert.deepEqual(pushHistory(rewound, '/a/x'),
+    { entries: ['/a', '/a/b', '/a/x'], index: 2 },
+    'the forward entries are dropped when a new direction is taken')
+
+  // The list is bounded, and dropping from the front keeps the cursor pointing
+  // at the newest entry rather than off the end.
+  let grown = { entries: [], index: -1 }
+  for (let i = 0; i < 200; i += 1) grown = pushHistory(grown, `/d${i}`)
+  assert.equal(grown.entries.length, 50, 'history is capped')
+  assert.equal(grown.index, 49, 'the cursor stays on the newest entry after trimming')
+  assert.equal(grown.entries[49], '/d199', 'the newest entry survives trimming')
+  assert.equal(grown.entries[0], '/d150', 'the oldest entries are the ones dropped')
+
+  // An empty path is not a directory and must not become an entry.
+  assert.equal(pushHistory(h, ''), h)
+
+  /* The buttons must reflect the cursor, not merely the list length. */
+  // Run the shipped rules rather than matching their source text: the predicates
+  // are lifted from client.js, so renaming a local cannot fail this and a change
+  // in what "can go back" MEANS cannot silently pass.
+  const bar = source.slice(source.indexOf('function FilesTab('), source.indexOf('function TerminalPane('))
+  {
+    const liftFn = (name) => {
+      const start = source.indexOf(`function ${name}(`)
+      assert.ok(start > 0, `${name} exists`)
+      let depth = 0
+      let end = source.indexOf('{', start)
+      for (; end < source.length; end += 1) {
+        if (source[end] === '{') depth += 1
+        else if (source[end] === '}') { depth -= 1; if (depth === 0) break }
+      }
+      return new Function(`${source.slice(start, end + 1)} return ${name}`)()
+    }
+    const canGoBack = liftFn('canGoBack')
+    const canGoForward = liftFn('canGoForward')
+
+    assert.equal(canGoBack({ entries: ['/a', '/b'], index: 1 }), true, 'Back is enabled mid-history')
+    assert.equal(canGoBack({ entries: ['/a', '/b'], index: 0 }), false, 'Back is disabled at the oldest entry')
+    assert.equal(canGoBack({ entries: [], index: -1 }), false, 'Back is disabled on an empty history')
+    assert.equal(canGoForward({ entries: ['/a', '/b'], index: 0 }), true, 'Forward is enabled mid-history')
+    assert.equal(canGoForward({ entries: ['/a', '/b'], index: 1 }), false, 'Forward is disabled at the newest entry')
+    assert.equal(canGoForward({ entries: [], index: -1 }), false, 'Forward is disabled on an empty history')
+    assert.equal(canGoForward({ entries: ['/a'], index: -1 }), false, 'Forward is never enabled before the first entry')
+
+    // The buttons must actually consult those rules. Named by the function, not by
+    // whatever local the component binds the result to, so a rename is not a failure.
+    assert.ok(/canGoBack\(history\)/u.test(bar), 'the Back button is gated on the rule')
+    assert.ok(/canGoForward\(history\)/u.test(bar), 'the Forward button is gated on the rule')
+  }
+
+  // Stepping reads the entry and moves the cursor; it must never append.
+  assert.ok(/void load\(history\.entries\[target\], target\)/u.test(bar),
+    'a step loads the neighbouring entry and passes its index')
+  assert.ok(/if \(typeof where === 'number'\)/u.test(bar), 'a numeric target moves the cursor')
+  assert.ok(/setHistory\(\(current\) => \(\{ entries: current\.entries, index: where \}\)\)/u.test(bar),
+    'a step replaces the cursor without touching the entries')
+  // And the state is applied only after a successful read, so a directory that
+  // has since been deleted cannot leave the cursor pointing at nothing.
+  const loadFn = /const load = React\.useCallback\(async \(next, where\) => \{[\s\S]*?\n      \}, \[serverId\]\)/u.exec(source)
+  assert.ok(loadFn !== null, 'the loader takes the history hint')
+  assert.ok(loadFn[0].indexOf('setHistory') > loadFn[0].indexOf('listedRef.current = value.path'),
+    'the history moves only after the read succeeded')
+  assert.ok(loadFn[0].indexOf('} catch (error) {') > loadFn[0].indexOf('setHistory'),
+    'the history update sits inside the success path, not the catch')
+
+  console.log('ok 12 - Back and Forward walk the history without appending or drifting')
 }
 
 /* --------------------------------------------------- gauges and the dialog */
@@ -507,6 +688,7 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   }
   const term = bodyOf('TerminalTab')
   const pane = bodyOf('TerminalPane')
+  const xterm = readFileSync(new URL('../client.xterm.js', import.meta.url), 'utf8')
 
   // Opening the tab is the whole gesture: the tab adopts what the Host holds or
   // opens one, and each pane attaches itself once it is laid out.
@@ -614,10 +796,16 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   // The regression: closing one of two dropped its id from both lists, leaving an
   // empty pane list. The survivor was still mounted but had no pane, so it was
   // hidden — indistinguishable from "both got closed".
-  assert.ok(/const live = panes\.filter\(\(id\) => termIds\.includes\(id\)\)/u.test(term),
-    'the layout intersects the pane list with the live terminals')
-  assert.ok(/const shown = live\.length > 0 \|\| termIds\.length === 0 \? live : \[termIds\[0\]\]/u.test(term),
-    'a surviving terminal is laid out even when no pane holds it')
+  // The pane arithmetic itself is executed in test/panes.test.mjs, against the
+  // shipped `repairPanes`/`shownPanes` lifted out of this file. What is left to
+  // check here is only the wiring: the component must call those functions, and a
+  // close must drop the id from both lists in one commit. Asserting the shape of
+  // the expressions would pin their spelling and break on a rename, which teaches
+  // nothing about whether a close still leaves a pane on screen.
+  assert.ok(/const repaired = repairPanes\(termIds, panes\)/u.test(term),
+    'the repair effect runs the shipped rule')
+  assert.ok(/const shown = shownPanes\(termIds, panes\)/u.test(term),
+    'the render path runs the shipped rule')
   const close = /const closeTerm = React\.useCallback\(async \(termId\) => \{([\s\S]*?)\n      \}, \[serverId\]\)/u.exec(term)
   assert.ok(close !== null, 'closeTerm exists')
   assert.ok(/setTermIds\(\(current\) => current\.filter\(\(id\) => id !== termId\)\)/u.test(close[1]),

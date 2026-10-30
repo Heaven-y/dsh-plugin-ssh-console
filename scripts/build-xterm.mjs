@@ -6,12 +6,13 @@
  * calls `window.__ModuleLoader__.load({ id, chunk, factory })`, and a sibling
  * chunk may carry the popular terminal library without touching the module
  * table: `require.async('./client.xterm.js')` resolves it relative to this
- * package. Both libraries below are MIT-licensed and are reproduced verbatim;
- * see THIRD-PARTY-NOTICES.
+ * package. All three libraries below are MIT-licensed and are reproduced
+ * verbatim; see THIRD-PARTY-NOTICES.
  *
  * Run: node scripts/build-xterm.mjs
- * Reads the installed `@xterm/xterm` and `@xterm/addon-fit` UMD bundles, so
- * those two packages must be installed before regenerating.
+ * Reads the installed `@xterm/xterm`, `@xterm/addon-fit` and
+ * `@xterm/addon-search` UMD bundles, so those three packages must be installed
+ * before regenerating.
  */
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -32,9 +33,10 @@ function readUmd(path) {
 const xtermRoot = join(import.meta.dirname, '..', 'node_modules', '@xterm')
 const xterm = readUmd(join(xtermRoot, 'xterm', 'lib', 'xterm.js'))
 const fit = readUmd(join(xtermRoot, 'addon-fit', 'lib', 'addon-fit.js'))
+const search = readUmd(join(xtermRoot, 'addon-search', 'lib', 'addon-search.js'))
 const css = readFileSync(join(xtermRoot, 'xterm', 'css', 'xterm.css'), 'utf8')
 
-for (const [name, source] of [['xterm', xterm], ['addon-fit', fit]]) {
+for (const [name, source] of [['xterm', xterm], ['addon-fit', fit], ['addon-search', search]]) {
   if (!source.includes('module.exports')) {
     throw new Error(`${name}: expected a UMD bundle assigning module.exports`)
   }
@@ -48,10 +50,11 @@ const output = `/**
  * Contains:
  *   - @xterm/xterm (MIT) - the terminal emulator
  *   - @xterm/addon-fit (MIT) - sizes the emulator to its container
+ *   - @xterm/addon-search (MIT) - searches the scrollback
  *
- * Both are reproduced verbatim from their published UMD bundles. Each is run
- * against its own \`module\`/\`exports\` pair so the two do not overwrite each
- * other, and the documented wrapper keeps them out of the page's module table.
+ * All three are reproduced verbatim from their published UMD bundles. Each is run
+ * against its own \`module\`/\`exports\` pair so they do not overwrite each other,
+ * and the documented wrapper keeps them out of the page's module table.
  */
 window.__ModuleLoader__.load({
   id: ${JSON.stringify(PKG_NAME)},
@@ -69,9 +72,16 @@ ${xterm}
 ${fit}
     })(fitModule, fitModule.exports)
 
+    // ---- @xterm/addon-search -----------------------------------------------
+    const searchModule = { exports: {} }
+    ;(function (module, exports) {
+${search}
+    })(searchModule, searchModule.exports)
+
     return {
       Terminal: xtermModule.exports.Terminal,
       FitAddon: fitModule.exports.FitAddon,
+      SearchAddon: searchModule.exports.SearchAddon,
       css: ${JSON.stringify(css)},
     }
   },

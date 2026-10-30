@@ -11,6 +11,40 @@ window.__ModuleLoader__.load({
     /** Remembers the last picked target across reloads. */
     const STORAGE_KEY = 'dsh.ssh-console.serverId'
 
+    /**
+     * The directory each server was last showing, keyed by server id.
+     *
+     * This lives outside the component on purpose. Closing the panel unmounts the
+     * page, and with it the file browser, so every reopen started over at the home
+     * directory — the one piece of state a person expects to survive, because
+     * getting back to a deep directory costs a walk. A module-level map outlives
+     * the component without writing remote paths into browser storage.
+     */
+    const LAST_DIR = new Map()
+
+    /**
+     * The last metrics snapshot each server reported, kept outside the component.
+     *
+     * The SSH connection is long-lived — the Host holds one per server for as long
+     * as the app runs — but the numbers on screen were React state, so closing the
+     * panel threw them away and every reopen blanked to "loading" for the length
+     * of a round trip. Sampling takes about 750 ms here, which is long enough to
+     * read as a stall rather than a refresh.
+     *
+     * A cached value is shown immediately and marked as being refreshed, so the
+     * panel never claims old numbers are current.
+     */
+    const SNAPSHOT_CACHE = new Map()
+
+    /**
+     * The last directory listing each server produced, kept for the same reason.
+     *
+     * Reopening the panel re-reads the directory anyway — that is what makes the
+     * listing current — but a read takes about 190 ms, and blanking the file list
+     * for that long on every reopen reads as a reload rather than a refresh.
+     */
+    const LISTING_CACHE = new Map()
+
     /* ---------------------------------------------------------------- styles */
 
     const CSS = `
@@ -33,6 +67,25 @@ window.__ModuleLoader__.load({
 .ssc-connect-title{margin:0;font-size:14px;line-height:20px;font-weight:600}
 .ssc-connect-sub{margin:0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
 .ssc-field{display:flex;flex-direction:column;gap:6px;min-width:0}
+/* Server form rows. The alias gets the wide column and the port a narrow one,
+   because that is the shape of the data: one long name, one short number. */
+.ssc-field-row{display:flex;align-items:flex-end;gap:8px;min-width:0}
+.ssc-field-grow{flex:1;min-width:0}
+.ssc-field-inline{flex:1;min-width:0}
+/* The mode switch shares a line with the picker's label, in the same slot for both
+   modes, so it reads as belonging to the picker rather than the save/delete row.
+   It wears the panel's own quiet-button style rather than a link: an underlined text
+   link was the only hyperlink in the whole surface and looked like page furniture
+   that had wandered into a form. */
+.ssc-picker-head{display:flex;align-items:center;justify-content:space-between;gap:10px;min-width:0}
+.ssc-picker-head .ssc-btn{flex:none;height:24px;padding:0 9px;font-size:12px}
+.ssc-new-badge{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary)}
+/* The description stands in for the server <select>, so it takes the same height as
+   a control. Without that, switching modes shifted every field below it by ~19px —
+   measured, not guessed — which made the form feel like it was jumping. */
+.ssc-new-sub{display:flex;align-items:center;min-height:34px;font-size:12px;
+  color:var(--dsw-alias-label-secondary);min-width:0}
+.ssc-control-narrow{width:84px;flex:none}
 .ssc-field-label{color:var(--dsw-alias-label-secondary);font-size:11.5px;font-weight:500}
 .ssc-field-hint{color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}
 .ssc-control{box-sizing:border-box;width:100%;height:34px;padding:0 10px;border:.5px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:13px;outline:none}
@@ -40,6 +93,8 @@ window.__ModuleLoader__.load({
 .ssc-control:disabled{opacity:.55}
 select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-image:linear-gradient(45deg,transparent 50%,currentColor 50%),linear-gradient(135deg,currentColor 50%,transparent 50%);background-position:calc(100% - 15px) 15px,calc(100% - 10px) 15px;background-size:5px 5px,5px 5px;background-repeat:no-repeat}
 .ssc-actions{display:flex;align-items:center;gap:8px}
+/* Removal sits at the far end, away from the buttons that keep or create. */
+.ssc-actions-end{margin-left:auto}
 
 /* buttons */
 .ssc-btn{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:6px;height:32px;padding:0 14px;border:.5px solid var(--dsw-alias-border-l2);border-radius:8px;background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:13px;line-height:20px;cursor:pointer;white-space:nowrap}
@@ -67,6 +122,16 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
 .ssc-modal-close:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .ssc-modal-body{padding:4px 16px 16px}
 .ssc-modal .ssc-connect{max-width:none;padding:0;border:0;border-radius:0;background:transparent}
+/* Host-key confirmation: the fingerprint is the only thing being compared, so it
+   gets its own line at a size that can be read aloud character by character. */
+.ssc-trust{display:flex;flex-direction:column;gap:12px}
+.ssc-trust-lead{margin:0;font-size:12.5px;line-height:19px}
+.ssc-trust-list{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:0;padding:10px 12px;border:.5px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-1)}
+.ssc-trust-list dt{margin:0;color:var(--dsw-alias-label-secondary);font-size:11px}
+.ssc-trust-list dd{margin:0;font-size:11.5px;overflow-wrap:anywhere}
+.ssc-trust-fp{font-weight:600;user-select:all}
+.ssc-trust-hint{margin:0;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:17px}
+.ssc-trust-actions{display:flex;justify-content:flex-end;gap:8px}
 
 /* tabs */
 .ssc-tabs{flex:none;display:flex;gap:2px;padding:12px 20px 0}
@@ -91,8 +156,25 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
 .ssc-host-meta{color:var(--dsw-alias-label-secondary);font-size:11.5px;font-variant-numeric:tabular-nums}
 .ssc-section{margin-top:14px}
 .ssc-section-head{display:flex;align-items:baseline;gap:8px;margin:0 0 8px}
+/* The heading is also the fold control, so it is a button that looks like a
+   heading: no chrome until hover, then the row shows it is pressable. */
+.ssc-section-toggle{width:100%;padding:4px 6px;margin:0 0 8px;border:0;border-radius:6px;background:transparent;color:inherit;font-family:inherit;text-align:left;cursor:pointer;align-items:center}
+.ssc-section-toggle:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.ssc-section-toggle:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+/* Large enough to read at a glance and to look like something you can press:
+   at 9px the caret was a speck that read as decoration rather than a control. */
+.ssc-caret{display:inline-block;flex:none;width:14px;color:var(--dsw-alias-label-secondary);font-size:14px;line-height:1;text-align:center;transition:transform .12s ease}
+.ssc-caret-open{transform:rotate(90deg)}
+/* Per-card fold control inside the GPU process table. */
+.ssc-group-toggle{display:flex;align-items:center;gap:6px;width:100%;padding:2px 0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.ssc-group-toggle:hover .ssc-caret{color:var(--dsw-alias-label-primary)}
+.ssc-group-toggle:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px;border-radius:4px}
 .ssc-section-title{margin:0;font-size:11.5px;font-weight:600;color:var(--dsw-alias-label-secondary);letter-spacing:.04em;text-transform:uppercase}
 .ssc-section-count{color:var(--dsw-alias-label-secondary);font-size:11px;font-variant-numeric:tabular-nums}
+/* Marks numbers that came from the last sample while a fresh one is on its way. */
+.ssc-stale{display:inline-flex;align-items:center;gap:5px;margin-bottom:8px;color:var(--dsw-alias-label-secondary);font-size:11px}
+.ssc-stale::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-state-warn-primary);animation:ssc-pulse 1s ease-in-out infinite}
+@keyframes ssc-pulse{0%,100%{opacity:.25}50%{opacity:1}}
 .ssc-gpus{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:8px}
 .ssc-gpu{display:flex;flex-direction:column;gap:9px;min-width:0;padding:10px 12px;border:.5px solid var(--dsw-alias-border-l1);border-radius:9px;background:var(--dsw-alias-bg-layer-1)}
 .ssc-gpu-head{display:flex;align-items:baseline;gap:8px;min-width:0}
@@ -180,6 +262,15 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
 .ssc-term-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;flex:1;min-height:0}
 .ssc-term-shell{position:relative;flex:1;min-height:0;border:.5px solid var(--dsw-alias-border-l1);border-radius:10px;background:var(--dsw-alias-bg-layer-1);overflow:hidden}
 .ssc-term-host{position:absolute;inset:0;padding:8px}
+/* Scrollback search bar: floats over the top-right of the pane, because it is a
+   temporary overlay and must not reflow the grid the PTY is sized against. */
+.ssc-search{position:absolute;top:6px;right:6px;z-index:3;display:flex;align-items:center;gap:4px;padding:4px 6px;border:.5px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-base);box-shadow:0 4px 14px color-mix(in srgb,var(--dsw-alias-label-primary) 12%,transparent)}
+.ssc-search-input{width:150px;padding:2px 6px;border:.5px solid var(--dsw-alias-border-l1);border-radius:5px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:16px}
+.ssc-search-input:focus{outline:none;border-color:var(--dsw-alias-brand-primary)}
+.ssc-search-count{min-width:0;color:var(--dsw-alias-label-secondary);font-size:10.5px;line-height:14px;white-space:nowrap}
+.ssc-search-step,.ssc-search-close{flex:none;display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;padding:0;border:0;border-radius:5px;background:transparent;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1;cursor:pointer}
+.ssc-search-step:hover:not(:disabled),.ssc-search-close:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.ssc-search-step:disabled{opacity:.4;cursor:default}
 .ssc-term-host .xterm{height:100%}
 .ssc-term-host .xterm-viewport{background:transparent!important;scrollbar-width:thin}
 .ssc-term-placeholder{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px}
@@ -266,6 +357,42 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       'connect.action': '连接',
       'connect.connecting': '连接中…',
       'connect.disconnect': '断开',
+      'trust.title': '确认主机密钥',
+      'trust.lead': '第一次连接到 {host}:{port}。请核对下面的指纹与服务器一致，确认后才会发送凭据。',
+      'trust.keyType': '密钥类型',
+      'trust.fingerprint': '指纹',
+      'trust.file': '保存到',
+      'trust.hint': '指纹不符时不要接受。若服务器确实更换过密钥，请自行删除 known_hosts 里的旧条目。',
+      'trust.accept': '信任并连接',
+      'trust.cancel': '取消',
+      'trust.unavailable': '无法校验主机密钥，因此没有发送任何凭据：{reason}',
+      'trust.mismatch': '{host} 出示的主机密钥与 {file} 中记录的不一致。这可能是中间人攻击，已拒绝连接。',
+      'trust.revoked': '{host} 出示的主机密钥在 {file} 中已被标记为吊销，已拒绝连接。',
+      'terminal.search': '搜索回滚内容',
+      'terminal.searchPlaceholder': '搜索（Ctrl+F）',
+      'terminal.searchPrev': '上一处',
+      'terminal.searchNext': '下一处',
+      'terminal.searchClose': '关闭搜索',
+      'terminal.searchNone': '无匹配',
+      'terminal.searchCount': '{index}/{count}',
+      'terminal.searchCountOf': '{count} 处',
+      'server.new': '新建',
+      'server.newHint': '清空表单，填写一台新的服务器',
+      'server.label': '别名',
+      'server.labelPlaceholder': '例如 A100服务器（不能有空格）',
+      'server.host': '主机 / IP',
+      'server.hostPlaceholder': '例如 122.205.68.212',
+      'server.port': '端口',
+      'server.user': '用户名',
+      'server.identityFile': '密钥文件（可选）',
+      'server.identityFilePlaceholder': '留空则用 ~/.ssh 下的默认密钥',
+      'server.save': '保存',
+      'server.saveHint': '写入 ~/.ssh/config',
+      'server.remove': '删除',
+      'server.removeHint': '从 ~/.ssh/config 里删掉这一节',
+      'server.removeConfirm': '从 ~/.ssh/config 删除「{label}」？这个操作不可撤销。',
+      'server.fromConfig': '来自 {file}',
+      'server.fromPlugin': '来自插件配置（只读）',
       'connect.add': '连接其他服务器',
       'state.connected': '{count} 台已连接',
       'state.idle': '未连接',
@@ -299,11 +426,14 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       'col.command': '命令',
       'col.gpu': 'GPU',
       'files.up': '上一级',
+      'files.back': '返回上一次所在目录',
+      'files.forward': '前进到下一个目录',
       'files.home': '主目录',
       'files.edit': '输入路径',
       'files.pathHint': '输入绝对路径，或 ~ 开头的路径，回车跳转',
       'files.refresh': '刷新',
       'files.loading': '加载中…',
+      'refreshing': '正在刷新…',
       'files.empty': '这个目录是空的',
       'files.truncated': '条目过多，只显示前 {count} 项',
       'files.binary': '二进制文件，无法预览',
@@ -339,6 +469,42 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       'connect.action': 'Connect',
       'connect.connecting': 'Connecting…',
       'connect.disconnect': 'Disconnect',
+      'trust.title': 'Confirm host key',
+      'trust.lead': 'First connection to {host}:{port}. Compare the fingerprint below with the server; credentials are sent only after you accept.',
+      'trust.keyType': 'Key type',
+      'trust.fingerprint': 'Fingerprint',
+      'trust.file': 'Saved to',
+      'trust.hint': 'Do not accept a fingerprint that disagrees with the server. If its key really was replaced, remove the old entry from known_hosts yourself.',
+      'trust.accept': 'Trust and connect',
+      'trust.cancel': 'Cancel',
+      'trust.unavailable': 'The host key could not be checked, so no credentials were sent: {reason}',
+      'trust.mismatch': '{host} presented a host key that does not match {file}. This is what an intercepted connection looks like; the connection was refused.',
+      'trust.revoked': '{host} presented a host key that {file} marks as revoked; the connection was refused.',
+      'terminal.search': 'Search scrollback',
+      'terminal.searchPlaceholder': 'Search (Ctrl+F)',
+      'terminal.searchPrev': 'Previous match',
+      'terminal.searchNext': 'Next match',
+      'terminal.searchClose': 'Close search',
+      'terminal.searchNone': 'No match',
+      'terminal.searchCount': '{index}/{count}',
+      'terminal.searchCountOf': '{count} matches',
+      'server.new': 'New',
+      'server.newHint': 'Clear the form and enter a new server',
+      'server.label': 'Alias',
+      'server.labelPlaceholder': 'e.g. A100-lab (no spaces)',
+      'server.host': 'Host / IP',
+      'server.hostPlaceholder': 'e.g. 122.205.68.212',
+      'server.port': 'Port',
+      'server.user': 'User',
+      'server.identityFile': 'Identity file (optional)',
+      'server.identityFilePlaceholder': 'Leave blank to use the default key in ~/.ssh',
+      'server.save': 'Save',
+      'server.saveHint': 'Write to ~/.ssh/config',
+      'server.remove': 'Remove',
+      'server.removeHint': 'Delete this block from ~/.ssh/config',
+      'server.removeConfirm': 'Delete "{label}" from ~/.ssh/config? This cannot be undone.',
+      'server.fromConfig': 'from {file}',
+      'server.fromPlugin': 'from plugin config (read-only)',
       'connect.add': 'Connect another server',
       'state.connected': '{count} connected',
       'state.idle': 'Not connected',
@@ -372,11 +538,14 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       'col.command': 'Command',
       'col.gpu': 'GPU',
       'files.up': 'Up',
+      'files.back': 'Back to the previous directory',
+      'files.forward': 'Forward to the next directory',
       'files.home': 'Home directory',
       'files.edit': 'Type a path',
       'files.pathHint': 'An absolute path, or one starting with ~, then press Enter',
       'files.refresh': 'Refresh',
       'files.loading': 'Loading…',
+      'refreshing': 'Refreshing…',
       'files.empty': 'This directory is empty',
       'files.truncated': 'Too many entries; showing the first {count}',
       'files.binary': 'Binary file, no preview',
@@ -621,7 +790,7 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
      * @param props - the session, its snapshot and the locale lookup.
      * @returns the block.
      */
-    function HostBlock({ session, snapshot, t }) {
+    function HostBlock({ session, snapshot, stale, t }) {
       const server = session.server ?? {}
       const failed = typeof snapshot?.error === 'string'
       const memory = snapshot?.memory ?? { totalBytes: 0, usedBytes: 0 }
@@ -636,7 +805,10 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
               snapshot?.os ?? session.os,
               `${server.user === undefined || server.user === '' ? '' : `${server.user}@`}${server.host}:${server.port}`,
               typeof session.since === 'number' ? t('since', { duration: formatDuration(Date.now() - session.since) }) : null,
-            ].filter(Boolean).join(' · '))),
+            ].filter(Boolean).join(' · ')),
+          // Cached numbers are shown straight away but labelled, so a reopened
+          // panel never presents a minutes-old reading as if it were live.
+          stale === true ? h('span', { className: 'ssc-stale' }, t('refreshing')) : null),
         snapshot === null || snapshot === undefined
           ? h('div', { className: 'ssc-hint' }, t('files.loading'))
           : failed
@@ -692,8 +864,8 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
      * @param props - the selected session, its snapshot and the locale lookup.
      * @returns the tab body.
      */
-    function OverviewTab({ session, snapshot, t }) {
-      return h(HostBlock, { session, snapshot, t })
+    function OverviewTab({ session, snapshot, stale, t }) {
+      return h(HostBlock, { session, snapshot, stale, t })
     }
 
     /**
@@ -708,7 +880,52 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
      * @param props - the rows and the locale lookup.
      * @returns the table, or null when the host reports none.
      */
+    /**
+     * A section heading that collapses the table beneath it.
+     *
+     * A busy GPU host runs dozens of processes; on the processes tab the tables
+     * for five cards plus the CPU list are longer than any screen, and the part a
+     * person is looking for is usually one of them. Folding the rest away is what
+     * makes that reachable without scrolling past it.
+     *
+     * The control is a button, so it is reachable and operable from the keyboard,
+     * and it reports its state through `aria-expanded` rather than relying on the
+     * chevron alone.
+     * @param props - the title, the summary shown while collapsed, the open state
+     *   and the toggle handler.
+     * @returns the heading row.
+     */
+    function SectionHead({ title, summary, open, onToggle }) {
+      return h('button', {
+        type: 'button',
+        className: 'ssc-section-head ssc-section-toggle',
+        onClick: onToggle,
+        'aria-expanded': open ? 'true' : 'false',
+        title,
+      },
+      h('span', { className: `ssc-caret ${open ? 'ssc-caret-open' : ''}`, 'aria-hidden': 'true' }, '▸'),
+      h('h4', { className: 'ssc-section-title' }, title),
+      summary === undefined || summary === null
+        ? null
+        : h('span', { className: 'ssc-section-count' }, summary))
+    }
+
+    /**
+     * The GPU processes of one host: which card, whose process, and its command.
+     *
+     * The command is shown in full and allowed to wrap. Shortening it dropped the
+     * interpreter and the script — exactly the part that says what the job is.
+     *
+     * Rows are grouped by card with a heading per group: a busy host runs dozens
+     * of compute processes, and a flat list makes "what is on #3" a scan instead
+     * of a glance. Each card's group folds independently, and the whole table
+     * folds from its own heading.
+     * @param props - the rows and the locale lookup.
+     * @returns the table, or null when the host reports none.
+     */
     function GpuProcessTable({ rows, t }) {
+      const [open, setOpen] = React.useState(true)
+      const [collapsed, setCollapsed] = React.useState(() => new Set())
       if (rows.length === 0) return null
 
       const groups = new Map()
@@ -719,46 +936,71 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       }
       const keys = [...groups.keys()].sort((left, right) => left - right)
 
+      const toggleGroup = (key) => {
+        setCollapsed((current) => {
+          const next = new Set(current)
+          if (next.has(key)) next.delete(key)
+          else next.add(key)
+          return next
+        })
+      }
+
       const bodies = keys.map((key) => {
         const mine = groups.get(key)
         const total = mine.reduce((sum, process) => sum + (process.usedMiB ?? 0), 0)
+        const folded = collapsed.has(key)
         return h('tbody', { key: `gpu-${key}` },
           h('tr', { className: 'ssc-group-row' },
             h('th', { className: 'ssc-group', colSpan: 5, scope: 'rowgroup' },
+              h('button', {
+                type: 'button',
+                className: 'ssc-group-toggle',
+                onClick: () => toggleGroup(key),
+                'aria-expanded': folded ? 'false' : 'true',
+              },
+              h('span', { className: `ssc-caret ${folded ? '' : 'ssc-caret-open'}`, 'aria-hidden': 'true' }, '▸'),
               h('span', { className: 'ssc-mono' }, key < 0 ? '—' : `#${key}`),
               h('span', { className: 'ssc-group-meta' },
-                `${t('gpu.procs', { count: mine.length })} · ${formatBytes(total * 2 ** 20)}`))),
-          mine.map((process) => h('tr', { key: `${key}-${process.pid}` },
-            h('td', { className: 'ssc-num ssc-mono' }, key < 0 ? '—' : `#${key}`),
-            h('td', { className: 'ssc-num ssc-mono' }, process.pid),
-            h('td', null, process.user ?? '—'),
-            h('td', { className: 'ssc-num' }, formatBytes((process.usedMiB ?? 0) * 2 ** 20)),
-            h('td', { className: 'ssc-mono ssc-cmd', title: process.command }, process.command ?? '—'))))
+                `${t('gpu.procs', { count: mine.length })} · ${formatBytes(total * 2 ** 20)}`)))),
+          folded
+            ? null
+            : mine.map((process) => h('tr', { key: `${key}-${process.pid}` },
+              h('td', { className: 'ssc-num ssc-mono' }, key < 0 ? '—' : `#${key}`),
+              h('td', { className: 'ssc-num ssc-mono' }, process.pid),
+              h('td', null, process.user ?? '—'),
+              h('td', { className: 'ssc-num' }, formatBytes((process.usedMiB ?? 0) * 2 ** 20)),
+              h('td', { className: 'ssc-mono ssc-cmd', title: process.command }, process.command ?? '—'))))
       })
 
       return h('div', { className: 'ssc-section' },
-        h('div', { className: 'ssc-section-head' },
-          h('h4', { className: 'ssc-section-title' }, t('gpu.processes')),
-          h('span', { className: 'ssc-section-count' },
-            `${t('gpu.procs', { count: rows.length })} · ${keys.length} GPU`)),
-        h('div', { className: 'ssc-table-wrap' },
-          h('table', { className: 'ssc-table ssc-table-wide' },
-            h('thead', null, h('tr', null,
-              h('th', { className: 'ssc-num' }, t('col.gpu')),
-              h('th', { className: 'ssc-num' }, t('col.pid')),
-              h('th', null, t('col.user')),
-              h('th', { className: 'ssc-num' }, t('gpu.memory')),
-              h('th', { className: 'ssc-cmd' }, t('col.command')))),
-            bodies)))
+        h(SectionHead, {
+          title: t('gpu.processes'),
+          summary: `${t('gpu.procs', { count: rows.length })} · ${keys.length} GPU`,
+          open,
+          onToggle: () => setOpen((current) => !current),
+        }),
+        open
+          ? h('div', { className: 'ssc-table-wrap' },
+            h('table', { className: 'ssc-table ssc-table-wide' },
+              h('thead', null, h('tr', null,
+                h('th', { className: 'ssc-num' }, t('col.gpu')),
+                h('th', { className: 'ssc-num' }, t('col.pid')),
+                h('th', null, t('col.user')),
+                h('th', { className: 'ssc-num' }, t('gpu.memory')),
+                h('th', { className: 'ssc-cmd' }, t('col.command')))),
+              bodies))
+          : null)
     }
 
     /**
      * The top processes of one host, with the columns that make a busy GPU host
      * readable: resident memory, thread count and how long it has been running.
+     * Folds from its heading, like the GPU table above it.
      * @param props - the rows and the locale lookup.
      * @returns the table.
      */
     function ProcessTable({ rows, t }) {
+      const [open, setOpen] = React.useState(true)
       const body = rows.map((process) => h('tr', { key: process.pid },
         h('td', { className: 'ssc-num ssc-mono' }, process.pid),
         h('td', null, process.user),
@@ -770,22 +1012,27 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
         h('td', { className: 'ssc-mono', title: process.state }, process.state),
         h('td', { className: 'ssc-mono ssc-cmd', title: process.command }, process.command)))
       return h('div', { className: 'ssc-section' },
-        h('div', { className: 'ssc-section-head' },
-          h('h4', { className: 'ssc-section-title' }, t('processes')),
-          h('span', { className: 'ssc-section-count' }, String(rows.length))),
-        h('div', { className: 'ssc-table-wrap' },
-          h('table', { className: 'ssc-table ssc-table-wide' },
-            h('thead', null, h('tr', null,
-              h('th', { className: 'ssc-num' }, t('col.pid')),
-              h('th', null, t('col.user')),
-              h('th', { className: 'ssc-num' }, t('col.cpu')),
-              h('th', { className: 'ssc-num' }, t('col.mem')),
-              h('th', { className: 'ssc-num' }, t('col.rss')),
-              h('th', { className: 'ssc-num' }, t('col.threads')),
-              h('th', { className: 'ssc-num' }, t('col.elapsed')),
-              h('th', null, t('col.state')),
-              h('th', { className: 'ssc-cmd' }, t('col.command')))),
-            h('tbody', null, body))))
+        h(SectionHead, {
+          title: t('processes'),
+          summary: String(rows.length),
+          open,
+          onToggle: () => setOpen((current) => !current),
+        }),
+        open
+          ? h('div', { className: 'ssc-table-wrap' },
+            h('table', { className: 'ssc-table ssc-table-wide' },
+              h('thead', null, h('tr', null,
+                h('th', { className: 'ssc-num' }, t('col.pid')),
+                h('th', null, t('col.user')),
+                h('th', { className: 'ssc-num' }, t('col.cpu')),
+                h('th', { className: 'ssc-num' }, t('col.mem')),
+                h('th', { className: 'ssc-num' }, t('col.rss')),
+                h('th', { className: 'ssc-num' }, t('col.threads')),
+                h('th', { className: 'ssc-num' }, t('col.elapsed')),
+                h('th', null, t('col.state')),
+                h('th', { className: 'ssc-cmd' }, t('col.command')))),
+              h('tbody', null, body)))
+          : null)
     }
 
     /**
@@ -793,10 +1040,11 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
      *
      * Same rule as the overview — one host at a time, chosen by the chip strip,
      * so the tables never scroll past a second machine's heading.
-     * @param props - the selected session, its snapshot and the locale lookup.
+     * @param props - the selected session, its snapshot, whether that snapshot
+     *   came from the cache, and the locale lookup.
      * @returns the tab body.
      */
-    function ProcessesTab({ session, snapshot, t }) {
+    function ProcessesTab({ session, snapshot, stale, t }) {
       if (snapshot === null || snapshot === undefined) {
         return h('div', { className: 'ssc-hint' }, t('files.loading'))
       }
@@ -806,10 +1054,49 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       const gpuRows = snapshot.gpuProcesses ?? []
       const rows = snapshot.processes ?? []
       return h(React.Fragment, null,
+        // The lists below came from the last sample, not this mount's first read.
+        stale === true ? h('div', { className: 'ssc-stale' }, t('refreshing')) : null,
         h(GpuProcessTable, { rows: gpuRows, t }),
         rows.length === 0
           ? h('div', { className: 'ssc-hint' }, t('processes.empty'))
           : h(ProcessTable, { rows, t }))
+    }
+
+    /**
+     * Decide what the pane list should become after terminals come and go.
+     *
+     * Kept as a plain function rather than inline in the effect so it can be run
+     * directly: this is the arithmetic that decides whether a surviving terminal
+     * is laid out or silently hidden, which is the difference between "closing one
+     * of two kept one open" and "closing one of two closed both".
+     * @param termIds - every terminal the host still has.
+     * @param panes - the terminals currently laid out.
+     * @returns the repaired list, or null when the current one is already right.
+     */
+    function repairPanes(termIds, panes) {
+      if (termIds.length === 0) return panes.length > 0 ? [] : null
+      // A pane pointing at a closed terminal must be replaced in state, not just
+      // filtered at render time: the survivor stays mounted but gets no slot, so
+      // it is laid out nowhere and the tab looks empty.
+      if (panes.length === 0) return [termIds[0]]
+      if (panes.every((id) => termIds.includes(id))) return null
+      const surviving = panes.filter((id) => termIds.includes(id))
+      return surviving.length > 0 ? surviving : [termIds[0]]
+    }
+
+    /**
+     * The panes to lay out right now, before the repair effect catches up.
+     *
+     * A close drops the id from both lists in one commit, leaving no pane for the
+     * survivor. Falling back to the first live terminal means a close never paints
+     * a blank frame between the state change and the effect that follows it.
+     * @param termIds - every terminal the host still has.
+     * @param panes - the terminals currently laid out.
+     * @returns the ids to lay out, in order.
+     */
+    function shownPanes(termIds, panes) {
+      const live = panes.filter((id) => termIds.includes(id))
+      return live.length > 0 || termIds.length === 0 ? live : [termIds[0]]
     }
 
     /**
@@ -844,6 +1131,80 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
     }
 
     /**
+     * How many directories the files tab remembers for Back and Forward.
+     *
+     * Generous enough to cover a real session's worth of wandering, bounded so a
+     * panel left open for days cannot grow the list without limit.
+     */
+    const MAX_HISTORY = 50
+    /**
+     * A blank server form.
+     *
+     * Frozen so a reset cannot accidentally share an object across states, and the
+     * port starts as text because the field is typed into before it is parsed.
+     */
+    const EMPTY_DRAFT = Object.freeze({ label: '', host: '', port: '22', user: '', identityFile: '' })
+    /** Turn a catalogue entry back into form text. */
+    function draftFrom(entry) {
+      return {
+        label: entry.label,
+        host: entry.host,
+        port: String(entry.port),
+        user: entry.user ?? '',
+        identityFile: entry.identityFile ?? '',
+      }
+    }
+
+    /**
+     * Whether the history has somewhere to go backwards to.
+     *
+     * Small enough to inline, but kept as a named rule so it can be run directly:
+     * the buttons must reflect the cursor, and "there is an entry before this one"
+     * is a statement worth checking rather than pattern-matching in a test.
+     * @param history - the current `{ entries, index }`.
+     * @returns true when Back should be enabled.
+     */
+    function canGoBack(history) {
+      return history.index > 0
+    }
+
+    /**
+     * Whether the history has somewhere to go forwards to.
+     * @param history - the current `{ entries, index }`.
+     * @returns true when Forward should be enabled.
+     */
+    function canGoForward(history) {
+      return history.index >= 0 && history.index < history.entries.length - 1
+    }
+
+    /**
+     * Append a directory to the browsing history, after the cursor.
+     *
+     * Navigating away from a position discards whatever was ahead of it, which is
+     * what every browser and file manager does: the entries forward of the cursor
+     * described a future the user just chose not to take. Re-reading the directory
+     * already at the cursor is not a new entry, so a refresh cannot fill the
+     * history with repeats.
+     *
+     * The list is capped, dropping the oldest entries. A long session could
+     * otherwise grow it without bound, and nobody walks back a hundred jumps.
+     * @param history - the current `{ entries, index }`.
+     * @param path - the resolved absolute path that was just read.
+     * @returns the next history; the same object when nothing changed.
+     */
+    function pushHistory(history, path) {
+      if (path.length === 0) return history
+      if (history.entries[history.index] === path) return history
+      const kept = history.entries.slice(0, history.index + 1)
+      const entries = [...kept, path]
+      if (entries.length > MAX_HISTORY) {
+        const dropped = entries.length - MAX_HISTORY
+        return { entries: entries.slice(dropped), index: entries.length - dropped - 1 }
+      }
+      return { entries, index: entries.length - 1 }
+    }
+
+    /**
      * The files tab: a read-only directory walk with a text preview.
      *
      * One of these is mounted per connected server and only the selected one is
@@ -857,23 +1218,46 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
     function FilesTab({ serverId, t, visible }) {
       // Empty until the first listing answers with a resolved absolute path; the
       // breadcrumb shows just the root meanwhile rather than a guess.
-      const [path, setPath] = React.useState('')
-      const [listing, setListing] = React.useState(null)
+      const [path, setPath] = React.useState(() => LAST_DIR.get(serverId) ?? '')
+      // Start from the last listing this server produced, so reopening the panel
+      // shows the directory immediately instead of blanking for a round trip.
+      const [listing, setListing] = React.useState(() => LISTING_CACHE.get(serverId) ?? null)
       const [loading, setLoading] = React.useState(false)
       const [failure, setFailure] = React.useState('')
       const [preview, setPreview] = React.useState(null)
       const [previewLoading, setPreviewLoading] = React.useState(false)
       const [editing, setEditing] = React.useState(false)
       const [draft, setDraft] = React.useState('')
+      // Browsing history, like a file manager's back/forward. Entries and the
+      // cursor live in one object: as two pieces of state the cursor could be
+      // committed against a list that had already been replaced in the same
+      // batch, and the two would drift.
+      const [history, setHistory] = React.useState({ entries: [], index: -1 })
       const inputRef = React.useRef(null)
       const crumbsRef = React.useRef(null)
 
       // The directory currently listed, as the server resolved it. Kept in a ref
       // so the visibility effect can re-read it without depending on `path`,
       // which would re-run on every navigation.
-      const listedRef = React.useRef('')
+      const listedRef = React.useRef(LAST_DIR.get(serverId) ?? '')
 
-      const load = React.useCallback(async (next) => {
+      /**
+       * Read one directory and, on success, place it in the history.
+       *
+       * The path committed to history is the resolved one the server returns,
+       * not what was asked for: `~` and `a/../b` arrive back as absolute paths,
+       * and history must hold only the form the breadcrumb can render.
+       *
+       * `where` is applied only after the read succeeds. A jump to a directory
+       * that has since been deleted reports the error and leaves the cursor
+       * untouched, so Back still leads somewhere that exists.
+       * @param next - the path to ask for.
+       * @param where - how this read relates to the history. Omitted for a plain
+       *   refresh, which must not add an entry; the string `'push'` for a new
+       *   navigation; a number to move the cursor to that index, which is what
+       *   Back and Forward do.
+       */
+      const load = React.useCallback(async (next, where) => {
         setLoading(true)
         setFailure('')
         try {
@@ -881,6 +1265,14 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
           setListing(value)
           setPath(value.path)
           listedRef.current = value.path
+          LAST_DIR.set(serverId, value.path)
+          LISTING_CACHE.set(serverId, value)
+          if (where === undefined) return
+          if (typeof where === 'number') {
+            setHistory((current) => ({ entries: current.entries, index: where }))
+          } else {
+            setHistory((current) => pushHistory(current, value.path))
+          }
         } catch (error) {
           setFailure(error instanceof Error ? error.message : String(error))
           setListing(null)
@@ -899,12 +1291,19 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
         if (!visible) return
         if (!loadedRef.current) {
           loadedRef.current = true
-          void load('~')
+          // Reopening the panel remounts this component. Starting at home every
+          // time would throw away the directory the user was reading, so resume
+          // where this server was left — if that directory has since gone, the
+          // read fails visibly and the home button is one click away.
+          const remembered = LAST_DIR.get(serverId)
+          void load(remembered === undefined ? '~' : remembered, 'push')
           return
         }
         // Coming back re-reads the directory already on screen, so what is shown
         // is current without moving the user. If the first attempt never
-        // succeeded there is nothing to return to, so try home again.
+        // succeeded there is nothing to return to, so try home again. This is a
+        // refresh, not a navigation, so it passes no `where` and leaves the
+        // history alone.
         void load(listedRef.current.length > 0 ? listedRef.current : '~')
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, [visible])
@@ -913,7 +1312,7 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
 
       const openEntry = React.useCallback((entry) => {
         if (entry.kind === 'directory') {
-          void load(join(path, entry.name))
+          void load(join(path, entry.name), 'push')
           setPreview(null)
           return
         }
@@ -964,8 +1363,24 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
         // the same directory would only add a round trip for nothing.
         if (next.length === 0 || next === path) return
         setPreview(null)
-        void load(next)
+        void load(next, 'push')
       }, [draft, path, load])
+
+      // Back and Forward. Each reads the neighbouring entry and moves the cursor
+      // to it, so stepping back and forward again is symmetric and a step never
+      // appends anything.
+      const canBack = canGoBack(history)
+      const canForward = canGoForward(history)
+
+      const step = React.useCallback((delta) => {
+        // Read from the state captured by this render, not from inside a setState
+        // updater: an updater must be pure, and starting a request from one would
+        // double up wherever React invokes it twice to check.
+        const target = history.index + delta
+        if (target < 0 || target >= history.entries.length) return
+        setPreview(null)
+        void load(history.entries[target], target)
+      }, [history, load])
 
       // Focus and select on entering edit mode, so typing replaces the path and
       // Escape-then-reopen never leaves a stale selection.
@@ -990,10 +1405,28 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
         style: visible ? undefined : { display: 'none' },
       },
       h('div', { className: 'ssc-path' },
+          // Back and Forward come first: they are the cheapest way to undo a
+          // wrong turn, and they sit where a browser puts them.
           h('button', {
             type: 'button',
             className: 'ssc-btn ssc-btn-quiet ssc-path-btn',
-            onClick: () => void load(parentPath),
+            onClick: () => step(-1),
+            disabled: loading || !canBack,
+            title: t('files.back'),
+            'aria-label': t('files.back'),
+          }, '←'),
+          h('button', {
+            type: 'button',
+            className: 'ssc-btn ssc-btn-quiet ssc-path-btn',
+            onClick: () => step(1),
+            disabled: loading || !canForward,
+            title: t('files.forward'),
+            'aria-label': t('files.forward'),
+          }, '→'),
+          h('button', {
+            type: 'button',
+            className: 'ssc-btn ssc-btn-quiet ssc-path-btn',
+            onClick: () => void load(parentPath, 'push'),
             disabled: loading,
             title: t('files.up'),
             'aria-label': t('files.up'),
@@ -1001,7 +1434,7 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
           h('button', {
             type: 'button',
             className: 'ssc-btn ssc-btn-quiet ssc-path-btn',
-            onClick: () => void load('~'),
+            onClick: () => void load('~', 'push'),
             disabled: loading,
             title: t('files.home'),
             'aria-label': t('files.home'),
@@ -1049,7 +1482,7 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
                   event.stopPropagation()
                   if (crumb.path === path) return
                   setPreview(null)
-                  void load(crumb.path)
+                  void load(crumb.path, 'push')
                 },
                 title: crumb.full,
               }, crumb.name)))),
@@ -1213,10 +1646,79 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
      *   whether it has keyboard focus and the locale lookup.
      * @returns the pane body.
      */
+    /**
+     * Count a query in the scrollback and locate the selected match among them.
+     *
+     * The addon can report this itself, but only when decorations are enabled, and
+     * decorations require literal `#RRGGBB` colours that this stylesheet does not
+     * allow. Rather than show a counter that could never update, the count is taken
+     * from the buffer the user is actually looking at.
+     *
+     * Rows are re-joined by `isWrapped` first: a long line is stored as several
+     * rows, and a match may well straddle the wrap, so counting per row would miss
+     * it and misreport the total.
+     * @param buffer - `term.buffer.active`.
+     * @param query - the search term.
+     * @param selection - `term.getSelectionPosition()`, whose rows are absolute.
+     * @returns the total count and the 1-based index of the selected match, or 0.
+     */
+    function scanMatches(buffer, query, selection) {
+      const needle = query.toLowerCase()
+      if (needle.length === 0) return { total: 0, index: 0 }
+      const selRow = selection === undefined || selection === null ? -1 : selection.start.y
+      const selCol = selection === undefined || selection === null ? -1 : selection.start.x
+      let total = 0
+      let index = 0
+      // The logical line being assembled, with each contributing row's offset into
+      // it, so a selection can be mapped back to an offset in the joined text.
+      let text = ''
+      let offsets = []
+      let rowNumbers = []
+      const countLine = () => {
+        const haystack = text.toLowerCase()
+        let from = 0
+        for (;;) {
+          const at = haystack.indexOf(needle, from)
+          if (at < 0) break
+          total += 1
+          if (index === 0 && selRow >= 0) {
+            const position = rowNumbers.indexOf(selRow)
+            if (position >= 0) {
+              const selected = offsets[position] + selCol
+              // The selection is exactly the match, so its start is the match start.
+              if (at === selected) index = total
+            }
+          }
+          from = at + needle.length
+        }
+      }
+      for (let row = 0; row < buffer.length; row += 1) {
+        const line = buffer.getLine(row)
+        if (line === undefined) continue
+        const chunk = line.translateToString(true)
+        if (line.isWrapped && rowNumbers.length > 0) {
+          offsets.push(text.length)
+          rowNumbers.push(row)
+          text += chunk
+          continue
+        }
+        countLine()
+        text = chunk
+        offsets = [0]
+        rowNumbers = [row]
+      }
+      countLine()
+      return { total, index }
+    }
+
     function TerminalPane({ serverId, termId, t, visible, focused }) {
       const holderRef = React.useRef(null)
       const termRef = React.useRef(null)
       const fitRef = React.useRef(null)
+      const searchRef = React.useRef(null)
+      const searchInputRef = React.useRef(null)
+      /** Set by `open()`: searches the live emulator. Stable across renders. */
+      const searchJumpRef = React.useRef(undefined)
       const cursorRef = React.useRef(0)
       const pendingRef = React.useRef('')
       const flushRef = React.useRef(undefined)
@@ -1224,6 +1726,11 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       const [failure, setFailure] = React.useState('')
       const [size, setSize] = React.useState(null)
       const [exitCode, setExitCode] = React.useState(undefined)
+      /** Whether the scrollback search bar is open over this pane. */
+      const [searchOpen, setSearchOpen] = React.useState(false)
+      const [query, setQuery] = React.useState('')
+      /** `{ total, index }` counted from the buffer, or null before a search. */
+      const [results, setResults] = React.useState(null)
       /** One automatic attempt per pane: a failing host must not spin. */
       const attemptedRef = React.useRef(false)
       /**
@@ -1319,6 +1826,41 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
             theme: terminalTheme(),
           })
           term.loadAddon(fit)
+          // Search runs over the scrollback this pane already holds, so it needs no
+          // Host round trip at all. Decorations stay off deliberately: they require
+          // literal `#RRGGBB` colours, and this stylesheet is theme tokens only.
+          // xterm's own selection highlight shows the active match instead.
+          const search = new vendored.SearchAddon()
+          term.loadAddon(search)
+          searchRef.current = search
+
+          /**
+           * Jump to the next match, forward or backward.
+           * @param direction - `'next'` or `'previous'`.
+           * @param term_ - the search term.
+           */
+          const jump = (direction, term_) => {
+            const node = termRef.current
+            if (term_.length === 0) {
+              searchRef.current.clearDecorations()
+              node?.clearSelection()
+              setResults(null)
+              return
+            }
+            const options = { caseSensitive: false, incremental: true }
+            const found = direction === 'next'
+              ? searchRef.current.findNext(term_, options)
+              : searchRef.current.findPrevious(term_, options)
+            if (!found) {
+              setResults({ total: 0, index: 0 })
+              return
+            }
+            if (node !== null) {
+              setResults(scanMatches(node.buffer.active, term_, node.getSelectionPosition()))
+            }
+          }
+          searchJumpRef.current = jump
+
           term.open(holder)
           // Only fit once the pane has a real box; a collapsed one reports a
           // 2-column geometry that would make the shell wrap its prompt.
@@ -1445,6 +1987,80 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
         termRef.current?.focus()
       }, [visible, focused])
 
+      // Ctrl+F opens search over the scrollback.
+      //
+      // The listener sits on the shell rather than on the emulator, because xterm
+      // forwards key events to the remote shell: without capturing here, Ctrl+F
+      // would be sent as a byte to whatever is running, and in `less` or `vim` it
+      // is a real paging key. Ctrl+F is taken only when a terminal is on screen;
+      // nothing else in this panel uses it.
+      React.useEffect(() => {
+        if (!visible) return undefined
+        const node = holderRef.current
+        if (node === null) return undefined
+        const onKeyDown = (event) => {
+          if (event.ctrlKey && !event.altKey && !event.metaKey && (event.key === 'f' || event.key === 'F')) {
+            event.preventDefault()
+            event.stopPropagation()
+            setSearchOpen(true)
+            return
+          }
+          // Escape closes the bar from anywhere in the pane.
+          if (event.key === 'Escape' && searchOpen) {
+            event.preventDefault()
+            event.stopPropagation()
+            setSearchOpen(false)
+            setQuery('')
+            setResults(null)
+            searchRef.current?.clearDecorations()
+            termRef.current?.focus()
+          }
+        }
+        node.addEventListener('keydown', onKeyDown, true)
+        return () => node.removeEventListener('keydown', onKeyDown, true)
+      }, [visible, searchOpen])
+
+      // Focus the field the moment the bar appears, so Ctrl+F then typing works.
+      React.useEffect(() => {
+        if (!searchOpen) return
+        const field = searchInputRef.current
+        if (field === null) return
+        field.focus()
+        field.select()
+      }, [searchOpen])
+
+      /**
+       * Closing the bar must give the keyboard back to the terminal.
+       *
+       * Leaving focus in a hidden input would swallow every keystroke, which in a
+       * terminal is worse than a missing feature: the shell would look dead.
+       */
+      const closeSearch = React.useCallback(() => {
+        setSearchOpen(false)
+        setQuery('')
+        setResults(null)
+        // `clearDecorations` only drops the addon's own state; the last match stays
+        // selected on screen unless the selection is cleared too.
+        searchRef.current?.clearDecorations()
+        termRef.current?.clearSelection()
+        termRef.current?.focus()
+      }, [])
+
+      /**
+       * Run the search for a typed value.
+       * @param value - the new query.
+       */
+      const runSearch = React.useCallback((value) => {
+        setQuery(value)
+        if (value.length === 0) {
+          searchRef.current?.clearDecorations()
+          termRef.current?.clearSelection()
+          setResults(null)
+          return
+        }
+        searchJumpRef.current?.('next', value)
+      }, [])
+
       // Unmounting the panel disposes the renderer but leaves the remote PTY
       // running, so reopening the page re-attaches to the same login.
       React.useEffect(() => () => {
@@ -1463,6 +2079,72 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
           : null,
         h('div', { className: 'ssc-term-shell' },
           h('div', { className: 'ssc-term-host', ref: holderRef }),
+          searchOpen
+            ? h('div', { className: 'ssc-search', role: 'search' },
+              h('input', {
+                ref: searchInputRef,
+                className: 'ssc-search-input',
+                type: 'text',
+                value: query,
+                placeholder: t('terminal.searchPlaceholder'),
+                'aria-label': t('terminal.search'),
+                spellCheck: false,
+                onChange: (event) => runSearch(event.target.value),
+                onKeyDown: (event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    searchJumpRef.current?.(event.shiftKey ? 'previous' : 'next', query)
+                    return
+                  }
+                  if (event.key === 'Escape') {
+                    event.preventDefault()
+                    closeSearch()
+                    return
+                  }
+                  // Ctrl+F again while already in the field must not fall through to
+                  // the browser's own find dialog.
+                  if (event.ctrlKey && !event.altKey && !event.metaKey && (event.key === 'f' || event.key === 'F')) {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    event.currentTarget.select()
+                  }
+                },
+              }),
+              h('span', { className: 'ssc-search-count' },
+                results === null
+                  ? ''
+                  : results.total === 0
+                    ? t('terminal.searchNone')
+                    : results.index === 0
+                      // The total is exact even when the selected match could not be
+                      // located, which happens when it starts above the oldest row
+                      // still in the scrollback.
+                      ? t('terminal.searchCountOf', { count: results.total })
+                      : t('terminal.searchCount', { index: results.index, count: results.total })),
+              h('button', {
+                type: 'button',
+                className: 'ssc-search-step',
+                title: t('terminal.searchPrev'),
+                'aria-label': t('terminal.searchPrev'),
+                disabled: query.length === 0,
+                onClick: () => searchJumpRef.current?.('previous', query),
+              }, '↑'),
+              h('button', {
+                type: 'button',
+                className: 'ssc-search-step',
+                title: t('terminal.searchNext'),
+                'aria-label': t('terminal.searchNext'),
+                disabled: query.length === 0,
+                onClick: () => searchJumpRef.current?.('next', query),
+              }, '↓'),
+              h('button', {
+                type: 'button',
+                className: 'ssc-search-close',
+                title: t('terminal.searchClose'),
+                'aria-label': t('terminal.searchClose'),
+                onClick: closeSearch,
+              }, '×'))
+            : null,
           phase === 'opening'
             ? h('div', { className: 'ssc-term-placeholder' }, h('span', { className: 'ssc-hint' }, t('terminal.opening')))
             : null),
@@ -1600,30 +2282,15 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
         })
       }, [focused])
 
-      // A closed terminal must not leave its slot empty. The pane list has to be
-      // repaired here rather than filtered at render time: a pane whose id is
-      // gone would otherwise be dropped from the layout while its sibling stayed
-      // mounted and hidden, which looks exactly like "closing one closed both".
-      // A pane whose terminal is gone must be repaired in state, otherwise the
-      // survivor stays mounted but hidden and the view looks empty.
+      // A closed terminal must not leave its slot empty.
       React.useEffect(() => {
-        if (termIds.length === 0) {
-          if (panes.length > 0) setPanes([])
-          return
-        }
-        if (panes.length === 0) {
-          setPanes([termIds[0]])
-          return
-        }
-        if (panes.every((id) => termIds.includes(id))) return
-        const surviving = panes.filter((id) => termIds.includes(id))
-        setPanes(surviving.length > 0 ? surviving : [termIds[0]])
+        const repaired = repairPanes(termIds, panes)
+        if (repaired !== null) setPanes(repaired)
       }, [termIds, panes])
 
       // Derived at render time as well, so a close never shows a blank frame
       // while the repair effect above catches up.
-      const live = panes.filter((id) => termIds.includes(id))
-      const shown = live.length > 0 || termIds.length === 0 ? live : [termIds[0]]
+      const shown = shownPanes(termIds, panes)
       // Panes in layout order first, then the mounted-but-hidden ones.
       const ordered = [...shown, ...termIds.filter((id) => !shown.includes(id))]
       const splitting = shown.length > 1
@@ -1748,24 +2415,45 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
      */
     function Modal({ title, onClose, children }) {
       const panelRef = React.useRef(null)
+      /**
+       * The close handler, read through a ref rather than captured by the effect.
+       *
+       * Every call site passes `onClose` as an inline arrow, so its identity is new
+       * on each render. An effect that depended on it re-ran on every render — and
+       * this panel re-renders every couple of seconds while the overview polls. Each
+       * re-run blurred whatever the user was in and re-focused the first field,
+       * which closed the server `<select>` mid-pick and looked like the refresh was
+       * interrupting the form.
+       */
+      const closeRef = React.useRef(onClose)
+      React.useEffect(() => {
+        closeRef.current = onClose
+      })
 
+      // Mount-only on purpose: taking and restoring focus is a property of the
+      // dialog being open, not of any prop. Re-running it is the bug above.
       React.useEffect(() => {
         const onKeyDown = (event) => {
           if (event.key === 'Escape') {
             event.stopPropagation()
-            onClose()
+            closeRef.current()
           }
         }
         document.addEventListener('keydown', onKeyDown, true)
         const previous = document.activeElement
         const panel = panelRef.current
-        const focusable = panel?.querySelector('select, input, button')
+        // Prefer a field over the header's close button. `querySelector` answers in
+        // document order, and the close button comes first, so a single grouped
+        // selector would put the caret on "close" every time this dialog opens --
+        // the opposite of what a keyboard user expects to type into.
+        const field = panel?.querySelector('select, input, textarea')
+        const focusable = field ?? panel?.querySelector('button')
         ;(focusable ?? panel)?.focus()
         return () => {
           document.removeEventListener('keydown', onKeyDown, true)
           if (previous !== null && typeof previous.focus === 'function') previous.focus()
         }
-      }, [onClose])
+      }, [])
 
       return h('div', {
         className: 'ssc-scrim',
@@ -1798,17 +2486,66 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
      * @param props - the catalogue, the current selection and the handlers.
      * @returns the form.
      */
-    function Connector({ catalogue, selectedId, password, busy, onSelect, onPassword, onConnect, lead = true, t }) {
+    function Connector({
+      catalogue, selectedId, password, busy, draft, editing, failure,
+      onSelect, onDraft, onPassword, onConnect, onSave, onRemove, onNew, onCancelNew,
+      lead = true, t,
+    }) {
       const server = catalogue?.servers.find((entry) => entry.id === selectedId)
+      // A target declared in this plugin's own config has no file to write back to,
+      // so the fields are read-only for it rather than silently discarded.
+      const canEdit = catalogue?.canEdit !== false && (editing === null || server?.editable === true)
+      const configPath = catalogue?.configPath ?? '~/.ssh/config'
+      /**
+       * One text field of the form.
+       * @param key - the draft key it edits.
+       * @param label - the visible label.
+       * @param extra - optional input attributes.
+       * @returns the field.
+       */
+      const field = (key, label, extra) => h('label', { className: 'ssc-field ssc-field-inline' },
+        h('span', { className: 'ssc-field-label' }, label),
+        h('input', Object.assign({
+          className: 'ssc-control',
+          type: 'text',
+          value: draft[key] ?? '',
+          disabled: busy || !canEdit,
+          autoComplete: 'off',
+          spellCheck: false,
+          onChange: (event) => onDraft(key, event.target.value),
+        }, extra ?? {})))
       return h('div', { className: 'ssc-connect' },
         lead
           ? h('div', { className: 'ssc-connect-lead' },
             h('h3', { className: 'ssc-connect-title' }, t('connect.title')),
             h('p', { className: 'ssc-connect-sub' }, t('connect.subtitle')))
           : null,
-        h('label', { className: 'ssc-field' },
-          h('span', { className: 'ssc-field-label' }, t('connect.server')),
-          h('select', {
+        // Two modes share one form, and which one is showing is decided by whether a
+        // server is selected, so the picker and the fields can never disagree.
+        //
+        // The mode switch sits in the SAME slot in both modes: "new" while looking
+        // at a server, "cancel" while drafting one. Same place, opposite meaning, so
+        // the row never reflows and the button reads as belonging to the picker
+        // above it rather than to the save/delete actions at the bottom. An earlier
+        // version put a "new server (unsaved)" entry INSIDE the dropdown, which
+        // looked like a target one could connect to, and it survived closing the
+        // dialog because the mode was tracked in state separate from the selection.
+        h('div', { className: 'ssc-picker-head' },
+          h('span', {
+            className: editing === null ? 'ssc-new-badge' : 'ssc-field-label',
+          }, editing === null ? t('server.newTitle') : t('connect.server')),
+          canEdit && (editing !== null || (catalogue?.servers.length ?? 0) > 0)
+            ? h('button', {
+              type: 'button',
+              className: 'ssc-btn ssc-btn-quiet',
+              onClick: editing === null ? onCancelNew : onNew,
+              disabled: busy,
+              title: editing === null ? t('server.cancelHint') : t('server.newHint'),
+            }, editing === null ? t('server.cancel') : `+ ${t('server.new')}`)
+            : null),
+        editing === null
+          ? h('span', { className: 'ssc-new-sub' }, t('server.newSub'))
+          : h('select', {
             className: 'ssc-control',
             value: selectedId,
             disabled: busy,
@@ -1818,11 +2555,21 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
             ? h('option', { value: '' }, t('connect.serverNone'))
             : catalogue.servers.map((entry) => h('option', { key: entry.id, value: entry.id },
               `${entry.label} — ${entry.user === undefined || entry.user === '' ? entry.host : `${entry.user}@${entry.host}`}:${entry.port}`))),
-          server === undefined
-            ? null
-            : h('span', { className: 'ssc-field-hint' }, `${server.host}:${server.port}${
-              server.source === 'ssh-config' ? ' · ~/.ssh/config' : ' · plugin config'
-            }`)),
+        // The fields always show the selected target and are edited in place; a new
+        // target simply starts blank. That is the whole mode model, so there is no
+        // separate "create" screen to get lost in.
+        h('div', { className: 'ssc-field-row' },
+          field('label', t('server.label'), { placeholder: t('server.labelPlaceholder') }),
+          field('port', t('server.port'), { className: 'ssc-control ssc-control-narrow', inputMode: 'numeric' })),
+        h('div', { className: 'ssc-field-row' },
+          field('host', t('server.host'), { placeholder: t('server.hostPlaceholder') }),
+          field('user', t('server.user'), { className: 'ssc-control ssc-control-narrow' })),
+        field('identityFile', t('server.identityFile'), { placeholder: t('server.identityFilePlaceholder') }),
+        server === undefined
+          ? null
+          : h('span', { className: 'ssc-field-hint' }, `${server.host}:${server.port} · ${
+            server.editable === true ? t('server.fromConfig', { file: configPath }) : t('server.fromPlugin')
+          }`),
         h('label', { className: 'ssc-field' },
           h('span', { className: 'ssc-field-label' }, t('connect.password')),
           h('input', {
@@ -1835,13 +2582,39 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
             onChange: (event) => onPassword(event.target.value),
           }),
           h('span', { className: 'ssc-field-hint' }, t('connect.passwordHint'))),
+        failure.length > 0 ? h('div', { className: 'ssc-hint ssc-fail', role: 'alert' }, failure) : null,
+        // Actions stay about the form's contents: connect, or keep. Starting another
+        // belongs with the picker up top, and removal is separated at the far end
+        // because it is the only one that destroys something.
         h('div', { className: 'ssc-actions' },
           h('button', {
             type: 'button',
             className: 'ssc-btn ssc-btn-primary',
             onClick: onConnect,
-            disabled: busy || selectedId.length === 0,
-          }, busy ? t('connect.connecting') : t('connect.action'))))
+            disabled: busy
+              || draft.host.trim().length === 0
+              // Connecting saves first, and a new target needs an alias before it
+              // can be written, so the button stays off until the form is complete.
+              || (canEdit && editing === null && draft.label.trim().length === 0),
+          }, busy ? t('connect.connecting') : t('connect.action')),
+          canEdit
+            ? h('button', {
+              type: 'button',
+              className: 'ssc-btn',
+              onClick: onSave,
+              disabled: busy || draft.label.trim().length === 0 || draft.host.trim().length === 0,
+              title: t('server.saveHint'),
+            }, t('server.save'))
+            : null,
+          canEdit && editing !== null
+            ? h('button', {
+              type: 'button',
+              className: 'ssc-btn ssc-btn-quiet ssc-actions-end',
+              onClick: onRemove,
+              disabled: busy,
+              title: t('server.removeHint'),
+            }, t('server.remove'))
+            : null))
     }
 
     /**
@@ -1856,10 +2629,31 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       const [selectedId, setSelectedId] = React.useState('')
       const [activeId, setActiveId] = React.useState('')
       const [password, setPassword] = React.useState('')
-      const [snapshots, setSnapshots] = React.useState({})
+      /**
+       * The editable copy of the selected target.
+       *
+       * Which target is being edited is NOT stored separately: it is whatever
+       * `selectedId` points at, and `editing` below is derived from the catalogue.
+       * An earlier version kept the alias in its own state alongside `selectedId`,
+       * and the two could drift — clicking "new" cleared the alias but left the id,
+       * so the form was blank while the picker still named a server.
+       */
+      const [draft, setDraft] = React.useState(EMPTY_DRAFT)
+      const [formFailure, setFormFailure] = React.useState('')
+      // Which server the current new-mode session was started from, so "cancel"
+      // can hand the user back to what they were looking at.
+      const startedFromRef = React.useRef('')
+      // Start from whatever was last sampled rather than from nothing: reopening
+      // the panel should show the last numbers and refresh them, not blank out.
+      const [snapshots, setSnapshots] = React.useState(() => Object.fromEntries(SNAPSHOT_CACHE))
+      // Servers whose displayed numbers came from the cache and have not been
+      // re-read yet during this mount.
+      const [unrefreshed, setUnrefreshed] = React.useState(() => new Set(SNAPSHOT_CACHE.keys()))
       const [tab, setTab] = React.useState('overview')
       const [busy, setBusy] = React.useState(false)
       const [connectorOpen, setConnectorOpen] = React.useState(false)
+      // A host key that is not on file yet, waiting for the user to compare it.
+      const [trustPrompt, setTrustPrompt] = React.useState(null)
       const [failure, setFailure] = React.useState('')
 
       const remember = React.useCallback((serverId) => {
@@ -1913,19 +2707,53 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       const pollable = tab === 'overview' || tab === 'processes'
       const pollId = pollable ? activeId : ''
 
+      /**
+       * The entry being edited, or undefined when a new target is being typed.
+       *
+       * Derived, never stored. This is the single source of truth for the mode, so
+       * the picker and the fields cannot disagree about which target is on screen.
+       */
+      const editingEntry = catalogue === null
+        ? undefined
+        : catalogue.servers.find((candidate) => candidate.id === selectedId)
+      const editing = editingEntry === undefined ? null : editingEntry.label
+
+      /**
+       * Load the selected target into the form.
+       *
+       * This is what makes selection and editing the same act: picking a server
+       * fills the fields with its values, so there is no "edit" button to find. A
+       * selection that no longer exists (after a delete) clears the form to the new
+       * state instead of leaving stale values behind.
+       */
+      React.useEffect(() => {
+        if (catalogue === null) return
+        const entry = catalogue.servers.find((candidate) => candidate.id === selectedId)
+        setDraft(entry === undefined ? EMPTY_DRAFT : draftFrom(entry))
+        setFormFailure('')
+      }, [catalogue, selectedId])
+
       React.useEffect(() => {
         if (pollId.length === 0) return undefined
         let alive = true
         const tick = async () => {
+          let next
           try {
-            const snapshot = await call('metrics', { serverId: pollId })
-            if (!alive) return
-            setSnapshots((current) => ({ ...current, [pollId]: snapshot }))
+            next = await call('metrics', { serverId: pollId })
           } catch (error) {
-            if (!alive) return
-            const message = error instanceof Error ? error.message : String(error)
-            setSnapshots((current) => ({ ...current, [pollId]: { error: message } }))
+            next = { error: error instanceof Error ? error.message : String(error) }
           }
+          if (!alive) return
+          // Cache outside the state updater: an updater must stay pure, and
+          // React may run it twice to check that.
+          SNAPSHOT_CACHE.set(pollId, next)
+          setSnapshots((current) => ({ ...current, [pollId]: next }))
+          setUnrefreshed((current) => {
+            if (!current.has(pollId)) return current
+            const copy = new Set(current)
+            copy.delete(pollId)
+            return copy
+          })
         }
         void tick()
         const timer = setInterval(() => void tick(), catalogue?.refreshMs ?? 2000)
@@ -1935,25 +2763,174 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
         }
       }, [pollId, catalogue?.refreshMs])
 
-      const connect = React.useCallback(async () => {
-        if (selectedId.length === 0) return
+      /**
+       * Connect to the selected target, after agreeing on its host key.
+       *
+       * The key is inspected first, in a handshake that carries no credentials, so
+       * the fingerprint can be compared before anything secret is offered. A key
+       * that disagrees with `known_hosts` is a hard stop: that is what an
+       * interception looks like, and it must not be reachable through the
+       * "first visit" path.
+       * @param approved - a fingerprint the user has already confirmed.
+       */
+      /**
+       * Write the form into `~/.ssh/config`.
+       * @param mode - `'add'` or `'update'`.
+       * @param forConnect - whether this save is a step of connecting.
+       * @returns the saved id, or undefined when the save was refused.
+       */
+      const saveForm = React.useCallback(async (mode, forConnect = false) => {
+        setFormFailure('')
+        const request = {
+          mode,
+          label: draft.label,
+          host: draft.host,
+          port: draft.port,
+          user: draft.user,
+          identityFile: draft.identityFile,
+        }
+        if (mode === 'update' && editing !== null) request.originalLabel = editing
+        try {
+          const saved = await call('saveServer', request)
+          setCatalogue(saved)
+          // Selecting the saved target is what leaves new mode: `editing` follows
+          // the selection, so there is no second piece of state to update here.
+          setSelectedId(saved.savedId)
+          return saved.savedId
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          // While connecting the message belongs next to the connect button, since
+          // that is the action the user just took.
+          if (forConnect) setFailure(message)
+          else setFormFailure(message)
+          return undefined
+        }
+      }, [draft, editing])
+
+      /**
+       * Save the form, then connect.
+       *
+       * Saving first is deliberate: the credentials are about to be offered to
+       * whatever the fields say, and a connection that is not written down would
+       * leave the list describing a different machine than the one now open.
+       * @param approved - a host-key fingerprint the user has already confirmed.
+       */
+      const connect = React.useCallback(async (approved) => {
+        if (draft.host.trim().length === 0) return
         setBusy(true)
         setFailure('')
         try {
-          const request = { serverId: selectedId }
+          // Each connect starts from what the form now says, because the previous
+          // attempt may have created an entry that the next step must reuse.
+          let targetId = selectedId
+          const editable = catalogue?.canEdit !== false
+          const entry = catalogue?.servers.find((candidate) => candidate.id === selectedId)
+          const needsSave = editable && (editing === null ? true : entry?.editable === true)
+          if (needsSave) {
+            const nextMode = editing === null ? 'add' : 'update'
+            targetId = await saveForm(nextMode, true)
+            if (targetId === undefined) return
+          }
+          // If the key cannot be inspected, the connection must not proceed: the
+          // whole point is that no credential is offered to an unidentified host.
+          // This also covers an older Host half answering, which reports the method
+          // as unknown rather than anything a user could act on.
+          let key
+          try {
+            key = await call('hostKey', { serverId: targetId })
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error)
+            // A transport failure is not a trust decision. Reporting a refused
+            // connection as "the key could not be verified" sends the reader off to
+            // inspect known_hosts when the real problem is that nothing answers.
+            setFailure(error?.code === 'ssh/unreachable'
+              ? t('trust.unreachable', { reason })
+              : t('trust.unavailable', { reason }))
+            return
+          }
+          if (key.status === 'mismatch' || key.status === 'revoked') {
+            setTrustPrompt(null)
+            setFailure(key.status === 'revoked'
+              ? t('trust.revoked', { host: key.host, file: key.knownHostsPath })
+              : t('trust.mismatch', { host: key.host, file: key.knownHostsPath }))
+            return
+          }
+          if (key.status === 'unknown' && approved !== key.fingerprint) {
+            // Stop before the password is offered and ask.
+            setTrustPrompt(key)
+            return
+          }
+          const request = { serverId: targetId }
           if (password.length > 0) request.password = password
+          if (key.status === 'unknown') request.trustFingerprint = key.fingerprint
           await call('connect', request)
+          setTrustPrompt(null)
           setPassword('')
           setConnectorOpen(false)
           await refreshSessions()
-          setActiveId(selectedId)
-          remember(selectedId)
+          setActiveId(targetId)
+          remember(targetId)
         } catch (error) {
           setFailure(error instanceof Error ? error.message : String(error))
         } finally {
           setBusy(false)
         }
-      }, [password, refreshSessions, remember, selectedId])
+      }, [catalogue, draft.host, editing, password, refreshSessions, remember, saveForm, selectedId, t])
+
+      /** Save without connecting. */
+      const saveOnly = React.useCallback(async () => {
+        setBusy(true)
+        try {
+          await saveForm(editing === null ? 'add' : 'update')
+        } finally {
+          setBusy(false)
+        }
+      }, [editing, saveForm])
+
+      /** Ask before removing, then remove the selected target's block. */
+      const removeSelected = React.useCallback(async () => {
+        if (editing === null) return
+        if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+          const question = t('server.removeConfirm', { label: editing })
+          if (!window.confirm(question)) return
+        }
+        setBusy(true)
+        setFormFailure('')
+        try {
+          const next = await call('removeServer', { label: editing })
+          setCatalogue(next)
+          // Moving the selection is what leaves edit mode for good, and the form
+          // follows it: the deleted target's values cannot linger.
+          setSelectedId(next.servers[0]?.id ?? '')
+          await refreshSessions()
+        } catch (error) {
+          setFormFailure(error instanceof Error ? error.message : String(error))
+        } finally {
+          setBusy(false)
+        }
+      }, [editing, refreshSessions, t])
+
+      /**
+       * Start a new target: clear the selection, which is what defines new mode.
+       *
+       * Clearing `selectedId` is the whole change. Leaving it set was the bug: the
+       * form emptied but the picker still named a server, and reopening the dialog
+       * brought that contradiction back.
+       */
+      const startNew = React.useCallback(() => {
+        startedFromRef.current = selectedId
+        setSelectedId('')
+        setDraft(EMPTY_DRAFT)
+        setFormFailure('')
+      }, [selectedId])
+
+      /** Leave new mode and go back to whichever target was on screen before. */
+      const cancelNew = React.useCallback(() => {
+        const back = startedFromRef.current
+        const exists = catalogue !== null && catalogue.servers.some((entry) => entry.id === back)
+        setSelectedId(exists ? back : (catalogue?.servers[0]?.id ?? ''))
+        setFormFailure('')
+      }, [catalogue])
 
       const disconnect = React.useCallback(async (serverId) => {
         setBusy(true)
@@ -2036,15 +3013,53 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
         selectedId,
         password,
         busy,
+        draft,
+        editing,
+        failure: formFailure.length > 0 ? formFailure : failure,
         onSelect: remember,
+        onDraft: (key, value) => setDraft((current) => ({ ...current, [key]: value })),
         onPassword: setPassword,
-        onConnect: () => void connect(),
+        onConnect: () => void connect(undefined),
+        onSave: () => void saveOnly(),
+        onRemove: () => void removeSelected(),
+        onNew: startNew,
+        onCancelNew: cancelNew,
         lead: !connected,
         t,
       })
       const connectorDialog = connected && connectorOpen
         ? h(Modal, { title: t('connect.title'), onClose: () => setConnectorOpen(false) }, connector)
         : null
+
+      // Shown instead of connecting, so the comparison happens before any
+      // credential leaves the machine.
+      const trustDialog = trustPrompt === null
+        ? null
+        : h(Modal, { title: t('trust.title'), onClose: () => setTrustPrompt(null) },
+          h('div', { className: 'ssc-trust' },
+            h('p', { className: 'ssc-trust-lead' },
+              t('trust.lead', { host: trustPrompt.host, port: trustPrompt.port })),
+            h('dl', { className: 'ssc-trust-list' },
+              h('dt', null, t('trust.keyType')),
+              h('dd', { className: 'ssc-mono' }, trustPrompt.keyType),
+              h('dt', null, t('trust.fingerprint')),
+              h('dd', { className: 'ssc-mono ssc-trust-fp' }, trustPrompt.fingerprint),
+              h('dt', null, t('trust.file')),
+              h('dd', { className: 'ssc-mono' }, trustPrompt.knownHostsPath)),
+            h('p', { className: 'ssc-trust-hint' }, t('trust.hint')),
+            h('div', { className: 'ssc-trust-actions' },
+              h('button', {
+                type: 'button',
+                className: 'ssc-btn',
+                onClick: () => setTrustPrompt(null),
+                disabled: busy,
+              }, t('trust.cancel')),
+              h('button', {
+                type: 'button',
+                className: 'ssc-btn ssc-btn-primary',
+                onClick: () => void connect(trustPrompt.fingerprint),
+                disabled: busy,
+              }, busy ? t('connect.connecting') : t('trust.accept')))))
 
       const strip = connected
         ? h('div', { className: 'ssc-strip' },
@@ -2093,6 +3108,7 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
         notice,
         strip,
         connectorDialog,
+        trustDialog,
         connected
           ? h(React.Fragment, null,
             h('div', { className: 'ssc-tabs' },
@@ -2106,9 +3122,9 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
               active === undefined
                 ? h('div', { className: 'ssc-hint' }, t('files.loading'))
                 : tab === 'overview'
-                  ? h(OverviewTab, { key: `overview:${activeId}`, session: active, snapshot: snapshots[activeId] ?? null, t })
+                  ? h(OverviewTab, { key: `overview:${activeId}`, session: active, snapshot: snapshots[activeId] ?? null, stale: unrefreshed.has(activeId), t })
                   : tab === 'processes'
-                    ? h(ProcessesTab, { key: `processes:${activeId}`, session: active, snapshot: snapshots[activeId] ?? null, t })
+                    ? h(ProcessesTab, { key: `processes:${activeId}`, session: active, snapshot: snapshots[activeId] ?? null, stale: unrefreshed.has(activeId), t })
                     : null,
               // One mounted file browser per host: leaving the tab hides it and
               // coming back re-reads the directory that is already open, instead
@@ -2178,6 +3194,9 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
           descriptorFor('connect'),
           descriptorFor('disconnect'),
           descriptorFor('status'),
+          descriptorFor('hostKey'),
+          descriptorFor('saveServer'),
+          descriptorFor('removeServer'),
           descriptorFor('listDir'),
           descriptorFor('readText'),
           descriptorFor('metrics'),

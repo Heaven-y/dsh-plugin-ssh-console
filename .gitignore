@@ -10,4 +10,9 @@ Thumbs.db
 pnpm-lock.yaml
 
 # Scratch files from local probing.
+#
+# Prefer this over /tmp when a probe needs to import the plugin by relative path,
+# and delete the directory when done. It has already happened once that a commit
+# message file written to the repo root was swept in by `git add -A`.
 .probe-*/
+*.msg.txt
