@@ -1557,24 +1557,96 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       }
       if (typeof getComputedStyle !== 'function' || typeof document === 'undefined') return fallback
       try {
-        const style = getComputedStyle(document.body)
-        const supports = typeof CSS === 'undefined' || typeof CSS.supports !== 'function'
-          ? () => true
-          : (value) => CSS.supports('color', value)
-        const read = (token) => {
-          const value = style.getPropertyValue(token).trim()
-          // The renderer wants a colour it can paint; a token holding a gradient
-          // or an unsupported function would leave the screen unthemed.
-          return value.length > 0 && supports(value) ? value : undefined
-        }
         return {
-          background: read('--dsw-alias-bg-layer-1') ?? fallback.background,
-          foreground: read('--dsw-alias-label-primary') ?? fallback.foreground,
-          cursor: read('--dsw-alias-brand-primary') ?? fallback.cursor,
-          selectionBackground: read('--dsw-alias-interactive-bg-hover') ?? fallback.selectionBackground,
+          background: readThemeColor('--dsw-alias-bg-layer-1') ?? fallback.background,
+          foreground: readThemeColor('--dsw-alias-label-primary') ?? fallback.foreground,
+          cursor: readThemeColor('--dsw-alias-brand-primary') ?? fallback.cursor,
+          selectionBackground: readThemeColor('--dsw-alias-interactive-bg-hover') ?? fallback.selectionBackground,
         }
       } catch {
         return fallback
+      }
+    }
+
+    /**
+     * Read one theme token as a colour the renderer can paint.
+     *
+     * Both callers need a literal colour rather than a `var(...)` string: xterm
+     * draws the screen to a canvas, and the search addon parses its decoration
+     * colours itself.
+     * @param token - the custom property, including the leading `--`.
+     * @returns the declared value, or undefined when it is absent or unusable.
+     */
+    function readThemeColor(token) {
+      if (typeof getComputedStyle !== 'function' || typeof document === 'undefined') return undefined
+      const style = getComputedStyle(document.body)
+      const value = style.getPropertyValue(token).trim()
+      if (value.length === 0) return undefined
+      // A token holding a gradient or an unsupported function would leave the
+      // screen unthemed, so it is rejected rather than passed through.
+      const supported = typeof CSS === 'undefined' || typeof CSS.supports !== 'function'
+        || CSS.supports('color', value)
+      return supported ? value : undefined
+    }
+
+    /**
+     * Turn one hex colour from a search option into `#RRGGBBAA`.
+     *
+     * xterm's decoration API only accepts `#RRGGBB[AA]`: it parses the string
+     * itself rather than handing it to CSS, so a token or a `color-mix()` would be
+     * rejected outright and the match would simply not be painted. The alpha
+     * channel is what keeps the glyphs under the highlight readable, so it is
+     * computed here from a coverage value instead of being written out by hand.
+     * @param hex - `#RGB`, `#RRGGBB` or `#RRGGBBAA`.
+     * @param alpha - coverage from 0 to 1, used only when `hex` carries none.
+     * @returns the eight-digit form, or undefined when the input is not hex.
+     */
+    function withAlpha(hex, alpha) {
+      if (typeof hex !== 'string') return undefined
+      const raw = hex.trim().replace(/^#/u, '')
+      if (/^[\da-f]{3}$/iu.test(raw)) {
+        const full = raw.split('').map((digit) => digit + digit).join('')
+        return `#${full}${toAlphaByte(alpha)}`
+      }
+      if (/^[\da-f]{6}$/iu.test(raw)) return `#${raw}${toAlphaByte(alpha)}`
+      if (/^[\da-f]{8}$/iu.test(raw)) return `#${raw}`
+      return undefined
+    }
+
+    /**
+     * Render 0..1 coverage as the two hex digits xterm's parser expects.
+     * @param alpha - coverage; clamped, and `undefined` means fully opaque.
+     * @returns two lowercase hex digits.
+     */
+    function toAlphaByte(alpha) {
+      const value = typeof alpha === 'number' && Number.isFinite(alpha) ? Math.min(1, Math.max(0, alpha)) : 1
+      return Math.round(value * 255).toString(16).padStart(2, '0')
+    }
+
+    /**
+     * Build the decoration options the search addon needs for a highlight.
+     *
+     * Two tints of one accent: every match gets the faint one so the scrollback
+     * still reads as text, and the selected match gets a stronger one so the jump
+     * is obvious. Both are derived from a theme colour, which is why this reads one
+     * at all — the addon cannot take a `var(...)` string, and the colour has to be
+     * resolved to a literal before it will paint anything.
+     *
+     * The overview-ruler entries are required by the API even though this panel
+     * never enables the ruler; they are the same accent.
+     * @param accent - the theme's highlight hue, as hex.
+     * @returns the decoration options, or undefined when the accent is unusable.
+     */
+    function searchDecorations(accent) {
+      const match = withAlpha(accent, 0.18)
+      const active = withAlpha(accent, 0.45)
+      if (match === undefined || active === undefined) return undefined
+      return {
+        matchBackground: match,
+        activeMatchBackground: active,
+        activeMatchBorder: withAlpha(accent, 1),
+        matchOverviewRuler: withAlpha(accent, 1),
+        activeMatchColorOverviewRuler: withAlpha(accent, 1),
       }
     }
 
@@ -1649,10 +1721,12 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
     /**
      * Count a query in the scrollback and locate the selected match among them.
      *
-     * The addon can report this itself, but only when decorations are enabled, and
-     * decorations require literal `#RRGGBB` colours that this stylesheet does not
-     * allow. Rather than show a counter that could never update, the count is taken
-     * from the buffer the user is actually looking at.
+     * The addon reports a count too, through `onDidChangeResults`, but that figure
+     * is the length of its *decoration* list: it stops collecting at its highlight
+     * limit (1000 by default) and reports `-1` for the index once the selected
+     * match falls outside that slice. A number that silently stops at 1000, or
+     * reads 3/1000 when it is really 3/4821, is worse than no number. This walks
+     * the buffer the user is actually looking at and counts every occurrence.
      *
      * Rows are re-joined by `isWrapped` first: a long line is stored as several
      * rows, and a match may well straddle the wrap, so counting per row would miss
@@ -1827,12 +1901,23 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
           })
           term.loadAddon(fit)
           // Search runs over the scrollback this pane already holds, so it needs no
-          // Host round trip at all. Decorations stay off deliberately: they require
-          // literal `#RRGGBB` colours, and this stylesheet is theme tokens only.
-          // xterm's own selection highlight shows the active match instead.
+          // Host round trip at all. Highlighting every match is opt-in through
+          // `decorations`, and that option only accepts literal `#RRGGBB[AA]`
+          // colours — a token or `color-mix()` is rejected by the addon's own
+          // parser and nothing is painted. `searchDecorations` therefore reads one
+          // colour out of the theme and derives the two tints from it.
           const search = new vendored.SearchAddon()
           term.loadAddon(search)
           searchRef.current = search
+          // Deliberately NOT `--dsw-alias-brand-primary`: that token is a neutral
+          // (`neutral-bluish-1000` in light, `-50` in dark), so washing it over the
+          // screen raises or lowers the contrast of the very glyphs being searched
+          // for. A near-white wash on a dark terminal is the worst case, because
+          // the text there is light too — the match becomes unreadable exactly
+          // where it is supposed to stand out. `state-warn-primary` is the only hue
+          // the theme exposes that reads on both backgrounds, and amber is what
+          // find-in-page highlighting uses anyway.
+          const decorations = searchDecorations(readThemeColor('--dsw-alias-state-warn-primary'))
 
           /**
            * Jump to the next match, forward or backward.
@@ -1848,6 +1933,10 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
               return
             }
             const options = { caseSensitive: false, incremental: true }
+            // Without this the selected match is only shown by the selection tint,
+            // which reads as "nothing happened" while typing: the count updates but
+            // the scrollback does not.
+            if (decorations !== undefined) options.decorations = decorations
             const found = direction === 'next'
               ? searchRef.current.findNext(term_, options)
               : searchRef.current.findPrevious(term_, options)

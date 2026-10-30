@@ -815,6 +815,58 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   assert.ok(!/setTermIds\(\(current\) => \{[\s\S]*?setPanes/u.test(close[1]),
     'one state update does not nest inside the other')
   console.log('ok 15 - the terminal opens itself, keeps its session, splits and shows no hint')
+
+  /* -------------------------------------- the selected match must be visible */
+
+  // The regression: `findNext` was called without `decorations`, so the addon
+  // selected the match and nothing was painted. The counter moved and the
+  // scrollback did not, which reads as "search is broken".
+  //
+  // The colour plumbing is executed, not mirrored: `searchDecorations` is lifted
+  // out of the shipped source and run with real inputs, because the constraint
+  // that broke it is the addon's own parser — it accepts `#RGB`, `#RRGGBB` and
+  // `#RRGGBBAA` and silently produces no decoration for anything else.
+  assert.ok(/if \(decorations !== undefined\) options\.decorations = decorations/u.test(pane),
+    'the jump hands the decoration options to the addon')
+  assert.ok(/searchDecorations\(readThemeColor\('--dsw-alias-state-warn-primary'\)\)/u.test(pane),
+    'the tints come from a theme hue')
+  // `brand-primary` is a neutral, not a hue: washing it over the screen fights the
+  // glyph colour instead of contrasting with it. Pinning the choice prevents a
+  // later "tidy-up" from reaching for the obvious-sounding token again.
+  assert.ok(!/searchDecorations\(readThemeColor\('--dsw-alias-brand-primary'\)\)/u.test(pane),
+    'the neutral brand colour is not used as a highlight wash')
+
+  const helpers = new Function(
+    `${blockOf(source, 'toAlphaByte')}\n${blockOf(source, 'withAlpha')}\n${blockOf(source, 'searchDecorations')}\nreturn { searchDecorations, withAlpha }`,
+  )()
+  const { withAlpha, searchDecorations } = helpers
+
+  assert.equal(withAlpha('#f59e0b', 0.5), '#f59e0b80', 'a six-digit colour gains an alpha channel')
+  assert.equal(withAlpha('#fff', 0.2), '#ffffff33', 'a three-digit colour is expanded first')
+  assert.equal(withAlpha('#f59e0bcc', 0.2), '#f59e0bcc', 'an explicit alpha is not overwritten')
+  assert.equal(withAlpha('color-mix(in srgb, red, blue)', 0.2), undefined,
+    'something the addon cannot parse is refused rather than passed through')
+  assert.equal(withAlpha(undefined, 0.2), undefined, 'a missing token is refused')
+
+  // What the addon actually receives must survive its parser. This is the shape
+  // check that is worth pinning: every value is a literal `#RRGGBBAA`.
+  const decorations = searchDecorations('#f59e0b')
+  assert.ok(decorations !== undefined, 'an accent produces decoration options')
+  const hex = /^#[\da-f]{8}$/u
+  for (const key of ['matchBackground', 'activeMatchBackground', 'activeMatchBorder',
+    'matchOverviewRuler', 'activeMatchColorOverviewRuler']) {
+    assert.ok(hex.test(decorations[key]), `${key} is a literal #RRGGBBAA, not a token`)
+  }
+  // The two tints must differ, or the selected match is not distinguishable from
+  // the rest and the jump is invisible even though the highlight now exists.
+  assert.notEqual(decorations.activeMatchBackground, decorations.matchBackground,
+    'the active match is tinted more strongly than the others')
+  assert.ok(Number.parseInt(decorations.matchBackground.slice(7), 16)
+    < Number.parseInt(decorations.activeMatchBackground.slice(7), 16),
+  'and it is the stronger of the two')
+  assert.equal(searchDecorations('not-a-colour'), undefined,
+    'an unusable accent disables highlighting instead of painting nothing')
+  console.log('ok 16 - a searched match is highlighted, and the colours survive the addon parser')
 }
 
 console.log('\nall client harness checks passed')
