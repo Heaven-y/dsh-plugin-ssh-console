@@ -103,6 +103,10 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
 .ssc-btn-primary{border-color:transparent;background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-bg-base);font-weight:500}
 .ssc-btn-primary:hover:not(:disabled){opacity:.9;background:var(--dsw-alias-brand-primary)}
 .ssc-btn-quiet{height:26px;padding:0 10px;font-size:12px}
+/* Destructive actions sit in the same row as the others, so they keep the same
+   box: shrinking one button to signal danger reads as a layout bug, not a
+   warning. The colour carries the distinction instead. */
+.ssc-btn-danger{color:var(--dsw-alias-state-error-primary)}
 .ssc-btn-icon{height:26px;width:26px;padding:0;font-size:15px;line-height:1}
 
 /* connected server chips */
@@ -803,7 +807,7 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
           h('span', { className: 'ssc-host-meta' },
             [
               snapshot?.os ?? session.os,
-              `${server.user === undefined || server.user === '' ? '' : `${server.user}@`}${server.host}:${server.port}`,
+              endpointOf(server),
               typeof session.since === 'number' ? t('since', { duration: formatDuration(Date.now() - session.since) }) : null,
             ].filter(Boolean).join(' · ')),
           // Cached numbers are shown straight away but labelled, so a reopened
@@ -1701,6 +1705,33 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       fit.fit()
       if (term.cols < MIN_TERM_COLS || term.rows < MIN_TERM_ROWS) return false
       return true
+    }
+
+    /**
+     * What one host's tab says.
+     *
+     * The configured alias wins, and that is the whole point: it is the name the
+     * user chose to recognise the machine by, and the one `~/.ssh/config` calls it.
+     * The remote's own hostname is only a fallback for a target that has no alias,
+     * because preferring it means a tab reads `user-H3C-UniServer-R5300-G6` while
+     * the entry the user created is called `A100` — the tab stops being an answer
+     * to "which machine is this".
+     * @param session - one entry from the connected `sessions` list.
+     * @returns the text to render in the tab.
+     */
+    function tabLabel(session) {
+      const server = session.server ?? {}
+      return server.label ?? session.hostname ?? server.host ?? session.serverId
+    }
+
+    /**
+     * The address a server connects to, as `user@host:port`.
+     * @param server - a public server record.
+     * @returns the endpoint; the user part is left out when there is none.
+     */
+    function endpointOf(server) {
+      const user = typeof server.user === 'string' && server.user.length > 0 ? `${server.user}@` : ''
+      return `${user}${server.host}:${server.port}`
     }
 
     /**
@@ -2698,7 +2729,7 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
           canEdit && editing !== null
             ? h('button', {
               type: 'button',
-              className: 'ssc-btn ssc-btn-quiet ssc-actions-end',
+              className: 'ssc-btn ssc-btn-danger ssc-actions-end',
               onClick: onRemove,
               disabled: busy,
               title: t('server.removeHint'),
@@ -3155,13 +3186,19 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
           h('div', { className: 'ssc-chips' },
             sessions.map((session) => {
               const server = session.server ?? {}
-              const label = session.hostname ?? server.label ?? server.host ?? session.serverId
+              // The tab carries the name the user gave the machine; the address and
+              // the remote's own hostname live in the tooltip, one hover away.
+              const endpoint = endpointOf(server)
+              const hostname = session.hostname
+              const title = typeof hostname === 'string' && hostname.length > 0
+                ? `${endpoint} · ${hostname}`
+                : endpoint
               return h('span', {
                 key: session.serverId,
                 className: `ssc-chip ${session.serverId === activeId ? 'ssc-chip-on' : ''}`,
                 role: 'button',
                 tabIndex: 0,
-                title: `${server.user === undefined || server.user === '' ? '' : `${server.user}@`}${server.host}:${server.port}`,
+                title,
                 onClick: () => setActiveId(session.serverId),
                 onKeyDown: (event) => {
                   if (event.key === 'Enter' || event.key === ' ') {
@@ -3171,7 +3208,7 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
                 },
               },
               h('span', { className: 'ssc-dot' }),
-              h('span', { className: 'ssc-chip-name' }, label),
+              h('span', { className: 'ssc-chip-name' }, tabLabel(session)),
               h('button', {
                 type: 'button',
                 className: 'ssc-chip-close',

@@ -867,6 +867,76 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   assert.equal(searchDecorations('not-a-colour'), undefined,
     'an unusable accent disables highlighting instead of painting nothing')
   console.log('ok 16 - a searched match is highlighted, and the colours survive the addon parser')
+
+  /* --------------------------------- the tab carries the name the user chose */
+
+  // The regression: the chip rendered `session.hostname ?? server.label ?? ...`, so
+  // a target the user had aliased as `A100` showed up as
+  // `user-H3C-UniServer-R5300-G6` — the remote's own hostname, which nobody
+  // recognises. Order matters here and nowhere else: the alias is what the tab is
+  // for, and the hostname belongs in the tooltip.
+  //
+  // The function is executed rather than pattern-matched, so a future reorder of
+  // the fallbacks fails on behaviour instead of on spelling.
+  const tabLabel = new Function(`${blockOf(source, 'tabLabel')}\nreturn tabLabel`)()
+
+  assert.equal(
+    tabLabel({ server: { label: 'A100', host: '122.205.68.212', port: 10007 }, hostname: 'user-H3C-UniServer-R5300-G6' }),
+    'A100',
+    'the configured alias wins over the remote hostname',
+  )
+  assert.equal(
+    tabLabel({ server: { label: 'A100', host: '10.0.0.2', port: 22 }, hostname: undefined }),
+    'A100',
+    'the alias is used even before the remote has answered',
+  )
+  assert.equal(
+    tabLabel({ server: { host: '10.0.0.2', port: 22 }, hostname: 'gpu-node-7' }),
+    'gpu-node-7',
+    'a target with no alias falls back to the hostname',
+  )
+  assert.equal(
+    tabLabel({ server: { host: '10.0.0.2', port: 22 }, hostname: undefined }),
+    '10.0.0.2',
+    'and then to the address it dials',
+  )
+  assert.equal(
+    tabLabel({ serverId: 'x@h:22', server: undefined, hostname: undefined }),
+    'x@h:22',
+    'the last resort is the id itself, never blank',
+  )
+  // The rendered chip must call it, not repeat the expression inline.
+  assert.ok(/h\('span', \{ className: 'ssc-chip-name' \}, tabLabel\(session\)\)/u.test(source),
+    'the chip renders the tabLabel result')
+
+  // One endpoint formatter, used everywhere: three copies of the `user@host:port`
+  // expression had drifted apart, and the tab's tooltip carried none of it.
+  const endpointOf = new Function(`${blockOf(source, 'endpointOf')}\nreturn endpointOf`)()
+  assert.equal(endpointOf({ user: 'yz', host: '122.205.68.212', port: 10007 }), 'yz@122.205.68.212:10007')
+  assert.equal(endpointOf({ user: '', host: '10.0.0.2', port: 22 }), '10.0.0.2:22', 'an empty user adds no @')
+  assert.equal(endpointOf({ user: undefined, host: 'h', port: 22 }), 'h:22', 'a missing user adds no @')
+  console.log('ok 17 - a tab shows the configured alias, and its tooltip carries the address')
+
+  /* ------------------------- the three footer actions are one row of one size */
+
+  // The regression: 连接 and 保存 were plain `ssc-btn` (32px, 13px text) while the
+  // destructive one carried `ssc-btn-quiet` (26px, 12px text). A single shrunken
+  // button reads as a rendering mistake, not as a warning — the warning is the
+  // colour. Its box is therefore measured against the others, not eyeballed.
+  const footer = /className: 'ssc-btn ssc-btn-danger ssc-actions-end'/u
+  assert.ok(footer.test(source), 'the destructive action is the danger variant')
+  assert.ok(!/className: 'ssc-btn ssc-btn-quiet ssc-actions-end'/u.test(source),
+    'and it no longer borrows the smaller quiet button')
+  assert.ok(/\.ssc-btn-danger\{color:var\(--dsw-alias-state-error-primary\)\}/u.test(css),
+    'the danger variant carries the error colour')
+  // No height or font-size of its own: it must inherit the row's box, or the two
+  // modifiers silently disagree about how tall a button is.
+  const dangerRule = /\.ssc-btn-danger\{([^}]*)\}/u.exec(css)
+  assert.ok(dangerRule !== null, 'the danger rule exists')
+  assert.ok(!/(^|;)height:/u.test(dangerRule[1]), 'the danger variant sets no height')
+  assert.ok(!/(^|;)font-size:/u.test(dangerRule[1]), 'the danger variant sets no font size')
+  assert.ok(/\.ssc-btn\{[^}]*height:32px/u.test(css), 'the shared button box is the one in effect')
+  console.log('ok 18 - the footer actions share one button box; danger is a colour, not a size')
 }
 
 console.log('\nall client harness checks passed')
