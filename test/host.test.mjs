@@ -6,10 +6,45 @@
  * stays runnable on a machine without the lab servers.
  */
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SshConsoleService, clampNumber, parsePortStrict } from '../index.js'
+
+/**
+ * Every scratch directory this run creates.
+ *
+ * `mkdtempSync` was used bare here for a long time, and one `npm test` left ~66
+ * directories behind: the suite had been quietly filling the temp folder on every
+ * run. Nothing failed, which is exactly why it went unnoticed. The fix that stays
+ * fixed is one the harness does not have to remember.
+ */
+const scratchDirs = []
+
+/**
+ * Create a scratch directory that is removed when the process exits.
+ *
+ * Cleanup runs on `exit` rather than at the end of the file: an assertion that
+ * throws would skip anything written after it, and a failing run is precisely when
+ * scratch files should not pile up. `exit` still fires for an uncaught throw.
+ * @param prefix - the `mkdtemp` prefix, e.g. `'ssc-hosts-'`.
+ * @returns the directory path.
+ */
+function scratchDir(prefix) {
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  scratchDirs.push(dir)
+  return dir
+}
+
+process.on('exit', () => {
+  for (const dir of scratchDirs) {
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch {
+      // A file still locked on Windows is not worth failing a passing run over.
+    }
+  }
+})
 
 /**
  * Fingerprint the user's real OpenSSH files before anything runs.
@@ -50,7 +85,7 @@ function fakeContext() {
 const ctx = fakeContext()
 // A scratch known_hosts: the suite must not append to the real one. It still
 // exercises the trust path, including the write.
-const knownHostsDir = mkdtempSync(join(tmpdir(), 'ssc-hosts-'))
+const knownHostsDir = scratchDir('ssc-hosts-')
 const service = new SshConsoleService(ctx, {
   refreshMs: 2000,
   knownHostsFile: join(knownHostsDir, 'known_hosts'),
@@ -591,7 +626,7 @@ const seed = [
   '  ForwardAgent yes',
   '',
 ].join('\n')
-const editDir = mkdtempSync(join(tmpdir(), 'ssc-config-'))
+const editDir = scratchDir('ssc-config-')
 const editPath = join(editDir, 'config')
 writeFileSync(editPath, seed)
 const editor = new SshConsoleService(ctx, {

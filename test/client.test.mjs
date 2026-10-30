@@ -642,7 +642,7 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   const page = bodyOf('SshConsolePage')
   assert.ok(page.includes('connectorDialog'), 'the page renders the dialog')
   assert.ok(!page.includes('ssc-connector-row'), 'the connector no longer inlines above the tabs')
-  console.log('ok 12 - each GPU gauge tracks its own metric and the connector is a dialog')
+  console.log('ok 13 - each GPU gauge tracks its own metric and the connector is a dialog')
 }
 
 /* ------------------------------------------------- full command, never cut */
@@ -672,7 +672,7 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   assert.ok(/td\.ssc-cmd\{[^}]*white-space:normal/u.test(css), 'the command cell wraps instead of clipping')
   assert.ok(/td\.ssc-cmd\{[^}]*overflow-wrap:anywhere/u.test(css), 'a long path can break mid-token')
   assert.ok(!/ssc-table-wide\{min-width:8\d\dpx\}/u.test(css), 'the table no longer forces an 860px floor')
-  console.log('ok 13 - the process tables show the full command line')
+  console.log('ok 14 - the process tables show the full command line')
 }
 
 /* ------------------------------------------------------- terminal lifecycle */
@@ -789,7 +789,7 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   assert.ok(/FALLBACK_TERM_SIZE/u.test(pane), 'an unmeasurable pane opens at a sane default instead of 2x1')
   assert.ok(/if \(!readyRef\.current\) return/u.test(pane),
     'no resize happens before the first screen is drawn')
-  console.log('ok 14 - the renderer stylesheet is installed and a collapsed fit is never believed')
+  console.log('ok 15 - the renderer stylesheet is installed and a collapsed fit is never believed')
 
   /* ------------------------------------------ closing one keeps the other */
 
@@ -814,7 +814,7 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
     'closing removes the pane id')
   assert.ok(!/setTermIds\(\(current\) => \{[\s\S]*?setPanes/u.test(close[1]),
     'one state update does not nest inside the other')
-  console.log('ok 15 - the terminal opens itself, keeps its session, splits and shows no hint')
+  console.log('ok 16 - the terminal opens itself, keeps its session, splits and shows no hint')
 
   /* -------------------------------------- the selected match must be visible */
 
@@ -866,7 +866,7 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   'and it is the stronger of the two')
   assert.equal(searchDecorations('not-a-colour'), undefined,
     'an unusable accent disables highlighting instead of painting nothing')
-  console.log('ok 16 - a searched match is highlighted, and the colours survive the addon parser')
+  console.log('ok 17 - a searched match is highlighted, and the colours survive the addon parser')
 
   /* --------------------------------- the tab carries the name the user chose */
 
@@ -915,7 +915,47 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   assert.equal(endpointOf({ user: 'yz', host: '122.205.68.212', port: 10007 }), 'yz@122.205.68.212:10007')
   assert.equal(endpointOf({ user: '', host: '10.0.0.2', port: 22 }), '10.0.0.2:22', 'an empty user adds no @')
   assert.equal(endpointOf({ user: undefined, host: 'h', port: 22 }), 'h:22', 'a missing user adds no @')
-  console.log('ok 17 - a tab shows the configured alias, and its tooltip carries the address')
+  console.log('ok 18 - a tab shows the configured alias, and its tooltip carries the address')
+
+  /* ------------------------- the faint tail that tells two aliases apart */
+
+  // Two entries can share an alias in practice ("gpu", "gpu"), and after a week
+  // the alias alone stops being an answer. So the machine's own name rides along
+  // in a lighter weight — but only when it says something the alias does not.
+  // Repeating a string the label already is would be noise inside the pill.
+  const tabSuffix = new Function(`${blockOf(source, 'tabSuffix')}\n${blockOf(source, 'tabLabel')}\nreturn tabSuffix`)()
+
+  assert.equal(
+    tabSuffix({ server: { label: 'gpu', host: '10.0.0.2', port: 22 }, hostname: 'node-a' }),
+    'node-a',
+    'the remote hostname rides along after an alias',
+  )
+  assert.equal(
+    tabSuffix({ server: { label: 'A100', host: '10.0.0.2', port: 22 }, hostname: undefined }),
+    '10.0.0.2',
+    'before the remote answers, the address distinguishes the tab',
+  )
+  assert.equal(
+    tabSuffix({ server: { host: '10.0.0.2', port: 22 }, hostname: '10.0.0.2' }),
+    undefined,
+    'nothing is appended when it would repeat the label',
+  )
+  assert.equal(
+    tabSuffix({ server: { label: 'A100', host: '10.0.0.2', port: 22 }, hostname: 'A100-lab-7' }),
+    'A100-lab-7',
+    'a hostname that merely contains the alias still adds information',
+  )
+  assert.equal(
+    tabSuffix({ server: { label: 'A100-lab-7', host: '10.0.0.2', port: 22 }, hostname: 'A100-lab-7' }),
+    undefined,
+    'an identical hostname is not repeated',
+  )
+  assert.equal(tabSuffix({ serverId: 'x', server: {}, hostname: undefined }), undefined,
+    'nothing to add when there is neither a hostname nor an address')
+  assert.ok(/suffix === undefined/u.test(source) && /className: 'ssc-chip-sub'/u.test(source),
+    'the chip renders the suffix, and only when there is one')
+  assert.ok(/\.ssc-chip-sub\{[^}]*max-width/u.test(css), 'the suffix has a rule of its own')
+  console.log('ok 19 - a tab adds the machine name only when the alias cannot stand alone')
 
   /* ------------------------- the three footer actions are one row of one size */
 
@@ -936,7 +976,7 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   assert.ok(!/(^|;)height:/u.test(dangerRule[1]), 'the danger variant sets no height')
   assert.ok(!/(^|;)font-size:/u.test(dangerRule[1]), 'the danger variant sets no font size')
   assert.ok(/\.ssc-btn\{[^}]*height:32px/u.test(css), 'the shared button box is the one in effect')
-  console.log('ok 18 - the footer actions share one button box; danger is a colour, not a size')
+  console.log('ok 20 - the footer actions share one button box; danger is a colour, not a size')
 }
 
 console.log('\nall client harness checks passed')

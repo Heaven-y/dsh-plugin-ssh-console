@@ -112,10 +112,16 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
 /* connected server chips */
 .ssc-strip{flex:none;display:flex;align-items:center;gap:8px;padding:10px 20px;border-bottom:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);overflow-x:auto}
 .ssc-chips{display:flex;align-items:center;gap:6px;min-width:0}
-.ssc-chip{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border:.5px solid var(--dsw-alias-border-l2);border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary);font-family:inherit;font-size:12px;white-space:nowrap;cursor:pointer;max-width:240px}
+.ssc-chip{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border:.5px solid var(--dsw-alias-border-l2);border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary);font-family:inherit;font-size:12px;white-space:nowrap;cursor:pointer;max-width:320px}
 .ssc-chip:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .ssc-chip-on{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary);font-weight:500}
 .ssc-chip-name{max-width:150px;overflow:hidden;text-overflow:ellipsis}
+/* The machine's own name, quieter than the alias it follows: readable when two
+   tabs share an alias, ignorable when they do not. The clamp is measured, not
+   guessed: the longest realistic hostname (user-H3C-UniServer-R5300-G6) renders
+   161px at this size, so 168px shows it whole and still ellipsises anything longer. */
+.ssc-chip-sub{max-width:168px;overflow:hidden;text-overflow:ellipsis;color:var(--dsw-alias-label-secondary);font-weight:400;font-size:11px;opacity:.8}
+.ssc-chip-on .ssc-chip-sub{color:var(--dsw-alias-label-secondary)}
 .ssc-chip-close{flex:none;display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border:0;border-radius:3px;background:transparent;color:inherit;font-size:12px;line-height:1;cursor:pointer;opacity:.65}
 .ssc-chip-close:hover{opacity:1;background:var(--dsw-alias-border-l1)}
 .ssc-scrim{position:absolute;inset:0;z-index:40;display:flex;align-items:center;justify-content:center;padding:24px;background:var(--dsw-alias-bg-base);background:color-mix(in srgb,var(--dsw-alias-bg-base) 74%,transparent);backdrop-filter:blur(2px)}
@@ -1725,6 +1731,32 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
     }
 
     /**
+     * The faint tail of a tab, when the alias alone cannot tell two apart.
+     *
+     * Two entries are allowed to share an alias in spirit ("gpu", "gpu"), and the
+     * alias is also what the user reads past after a week. So the machine's own
+     * name rides along in a lighter weight — but only when it says something the
+     * label does not. A target with no alias is already labelled by its hostname or
+     * address, and repeating that inside the same pill is noise.
+     * @param session - one entry from the connected `sessions` list.
+     * @returns the distinguishing text, or undefined when there is nothing to add.
+     */
+    function tabSuffix(session) {
+      const server = session.server ?? {}
+      const label = String(tabLabel(session))
+      const hostname = typeof session.hostname === 'string' ? session.hostname.trim() : ''
+      // Before the remote has answered there is no hostname yet; the address it
+      // dials is the only thing that can still tell two machines apart.
+      const candidate = hostname.length > 0 ? hostname : String(server.host ?? '').trim()
+      // One condition, on purpose. `includes` also covers an exact match (a string
+      // contains itself), and splitting that into two guards would leave each one
+      // able to mask the other's removal — a test could not then tell which rule
+      // was actually doing the work.
+      if (candidate.length === 0 || label.includes(candidate)) return undefined
+      return candidate
+    }
+
+    /**
      * The address a server connects to, as `user@host:port`.
      * @param server - a public server record.
      * @returns the endpoint; the user part is left out when there is none.
@@ -3186,13 +3218,15 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
           h('div', { className: 'ssc-chips' },
             sessions.map((session) => {
               const server = session.server ?? {}
-              // The tab carries the name the user gave the machine; the address and
-              // the remote's own hostname live in the tooltip, one hover away.
+              // The tab carries the name the user gave the machine, and the
+              // machine's own name only when it adds something. The full address
+              // stays in the tooltip, one hover away.
               const endpoint = endpointOf(server)
               const hostname = session.hostname
               const title = typeof hostname === 'string' && hostname.length > 0
                 ? `${endpoint} · ${hostname}`
                 : endpoint
+              const suffix = tabSuffix(session)
               return h('span', {
                 key: session.serverId,
                 className: `ssc-chip ${session.serverId === activeId ? 'ssc-chip-on' : ''}`,
@@ -3209,6 +3243,9 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
               },
               h('span', { className: 'ssc-dot' }),
               h('span', { className: 'ssc-chip-name' }, tabLabel(session)),
+              suffix === undefined
+                ? null
+                : h('span', { className: 'ssc-chip-sub' }, suffix),
               h('button', {
                 type: 'button',
                 className: 'ssc-chip-close',
