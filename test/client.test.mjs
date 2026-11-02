@@ -977,6 +977,57 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   assert.ok(!/(^|;)font-size:/u.test(dangerRule[1]), 'the danger variant sets no font size')
   assert.ok(/\.ssc-btn\{[^}]*height:32px/u.test(css), 'the shared button box is the one in effect')
   console.log('ok 20 - the footer actions share one button box; danger is a colour, not a size')
+
+  /* -------------------------- the file toolbar icons share one geometry */
+
+  // The regression: the toolbar was font glyphs — U+2190, U+2191, U+270E, U+27F3
+  // and a plain tilde. Measured at 13px their ink is 13x5, 6x12, 11x11, 12x9 and
+  // 8x2 px, with optical centres 1.5px apart above a shared baseline, so no
+  // baseline or padding could align them. They are now one drawn icon set.
+  //
+  // Executed, not mirrored: the icon components are lifted out of the shipped
+  // source and called, so the assertion is about the geometry they emit.
+  const fakeElement = (tag, props, ...children) => ({ tag, props: props ?? {}, children: children.flat(2) })
+  const iconFactory = new Function(
+    'h',
+    `${blockOf(source, 'LineIcon')}\n${blockOf(source, 'BackIcon')}\n${blockOf(source, 'ForwardIcon')}\n`
+    + `${blockOf(source, 'UpIcon')}\n${blockOf(source, 'HomeIcon')}\n${blockOf(source, 'PencilIcon')}\n`
+    + `${blockOf(source, 'RefreshIcon')}\n`
+    + 'return { BackIcon, ForwardIcon, UpIcon, HomeIcon, PencilIcon, RefreshIcon }',
+  )
+
+  const icons = iconFactory(fakeElement)
+  const drawn = Object.values(icons).map((Icon) => Icon())
+  assert.equal(drawn.length, 6, 'the toolbar has six icon components')
+
+  for (const [index, node] of drawn.entries()) {
+    assert.equal(node.tag, 'svg', `icon ${index} is an svg, not a text glyph`)
+    // One geometry for all of them is the whole point: the same box is what makes
+    // six unrelated shapes look like one set.
+    assert.equal(node.props.width, 14, `icon ${index} is 14px wide`)
+    assert.equal(node.props.height, 14, `icon ${index} is 14px tall`)
+    assert.equal(node.props.viewBox, '0 0 16 16', `icon ${index} uses the shared viewBox`)
+    assert.equal(node.props.strokeWidth, 1.1, `icon ${index} uses the shared stroke weight`)
+    assert.ok(node.children.length > 0, `icon ${index} draws at least one path`)
+    for (const path of node.children) {
+      assert.equal(path.tag, 'path', `icon ${index} is made of paths`)
+      assert.equal(typeof path.props.d, 'string', `icon ${index} has geometry`)
+      assert.equal(path.props.stroke, 'currentColor', `icon ${index} inherits the text colour`)
+    }
+  }
+
+  // The five characters that could not line up must be gone from the toolbar. The
+  // search bar keeps its own up/down pair, which is a different surface.
+  const filesBody = source.slice(source.indexOf('const FilesTab'))
+  assert.ok(!/'[←→↑↓✎⟳]'/u.test(filesBody), 'the file toolbar renders no font-glyph icons')
+  assert.ok(!/\}, '~'\)/u.test(filesBody), 'the home button is a drawn icon, not a tilde')
+  for (const name of ['BackIcon', 'ForwardIcon', 'UpIcon', 'HomeIcon', 'PencilIcon', 'RefreshIcon']) {
+    assert.ok(new RegExp(`\\}, h\\(${name}\\)\\)`, 'u').test(source), `${name} is what the button renders`)
+  }
+  // The button no longer needs to size a glyph.
+  assert.ok(!/\.ssc-path-btn\{[^}]*font-size/u.test(css),
+    'the toolbar button no longer sizes a font glyph')
+  console.log('ok 21 - the file toolbar icons are one drawn set, so they line up by construction')
 }
 
 console.log('\nall client harness checks passed')

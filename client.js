@@ -217,8 +217,10 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
    contribute layout while another tab is on screen. */
 .ssc-files{display:block}
 .ssc-path{display:flex;align-items:center;gap:6px;margin-bottom:12px}
-/* A square, quiet button for the toolbar glyphs: ↑ ~ ✎ ⟳ */
-.ssc-path-btn{flex:none;width:28px;height:28px;padding:0;justify-content:center;font-size:13px;line-height:1}
+/* A square, quiet button for one toolbar icon. The icons are 14x14 svg with a
+   shared viewBox, so the box only has to centre them: there is no font size or
+   line height to tune here anymore, which is what used to make them look crooked. */
+.ssc-path-btn{flex:none;width:28px;height:28px;padding:0;justify-content:center}
 .ssc-crumbs{flex:1;min-width:0;display:flex;align-items:center;gap:2px;height:28px;padding:0 8px;border:.5px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-1);overflow-x:auto;overflow-y:hidden;white-space:nowrap;cursor:text;scrollbar-width:thin;scrollbar-color:var(--dsw-alias-border-l2) transparent}
 .ssc-crumbs::-webkit-scrollbar{height:4px}
 .ssc-crumbs::-webkit-scrollbar-thumb{background:var(--dsw-alias-border-l2);border-radius:2px}
@@ -325,6 +327,68 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       h('rect', { x: 1.5, y: 2.5, width: 13, height: 11, rx: 1.6, stroke: 'currentColor' }),
       h('path', { d: 'M4.2 6.3L6.1 8L4.2 9.7', stroke: 'currentColor', strokeLinecap: 'round', strokeLinejoin: 'round' }),
       h('path', { d: 'M8.2 10H11.4', stroke: 'currentColor', strokeLinecap: 'round' }))
+    }
+
+    /**
+     * One 16x16 line icon, drawn at the size the toolbar uses.
+     *
+     * The file toolbar used to be font glyphs — U+2190, U+2191, U+270E, U+27F3 and
+     * a plain tilde — and that is what made it look crooked. Measured at 13px, the
+     * ink of those five chars is 13x5, 6x12, 11x11, 12x9 and 8x2 pixels, with their
+     * optical centres spread 1.5px apart above a shared baseline. They come from
+     * unrelated Unicode blocks and were never designed to sit together, so no
+     * single baseline, padding or line-height can line them up: aligning any two
+     * pushes the others off. A shared viewBox and one stroke weight makes them
+     * agree by construction, and matches how folder/file/link are already drawn.
+     * @param paths - path `d` strings, all stroked with the current text colour.
+     * @returns the svg element.
+     */
+    function LineIcon(paths) {
+      return h('svg', {
+        width: 14,
+        height: 14,
+        viewBox: '0 0 16 16',
+        fill: 'none',
+        strokeWidth: 1.1,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+        'aria-hidden': true,
+      }, paths.map((d) => h('path', { key: d, d, stroke: 'currentColor' })))
+    }
+
+    /** Back arrow. */
+    function BackIcon() {
+      return LineIcon(['M3.7 8H12.3', 'M6.9 4.8L3.7 8l3.2 3.2'])
+    }
+
+    /** Forward arrow. */
+    function ForwardIcon() {
+      return LineIcon(['M12.3 8H3.7', 'M9.1 4.8L12.3 8l-3.2 3.2'])
+    }
+
+    /** Up arrow: the parent directory. */
+    function UpIcon() {
+      return LineIcon(['M8 12.3V3.7', 'M4.8 6.9L8 3.7l3.2 3.2'])
+    }
+
+    /** Down arrow, for stepping through matches. */
+    function DownIcon() {
+      return LineIcon(['M8 3.7v8.6', 'M4.8 9.1L8 12.3l3.2-3.2'])
+    }
+
+    /** House, for the home directory. */
+    function HomeIcon() {
+      return LineIcon(['M2.6 7.5L8 2.7l5.4 4.8', 'M4.3 6.8v6.5h7.4V6.8'])
+    }
+
+    /** Pencil, for typing a path. */
+    function PencilIcon() {
+      return LineIcon(['M11.2 2.8l2 2-7.6 7.6-2.8.8.8-2.8 7.6-7.6z', 'M9.6 4.4l2 2'])
+    }
+
+    /** Circular arrow, for re-reading the directory. */
+    function RefreshIcon() {
+      return LineIcon(['M13.4 8A5.4 5.4 0 1 1 12.2 4.6', 'M13.4 4.8V8H10.2'])
     }
 
     /** Folder glyph. */
@@ -1424,7 +1488,7 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
             disabled: loading || !canBack,
             title: t('files.back'),
             'aria-label': t('files.back'),
-          }, '←'),
+          }, h(BackIcon)),
           h('button', {
             type: 'button',
             className: 'ssc-btn ssc-btn-quiet ssc-path-btn',
@@ -1432,7 +1496,7 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
             disabled: loading || !canForward,
             title: t('files.forward'),
             'aria-label': t('files.forward'),
-          }, '→'),
+          }, h(ForwardIcon)),
           h('button', {
             type: 'button',
             className: 'ssc-btn ssc-btn-quiet ssc-path-btn',
@@ -1440,7 +1504,7 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
             disabled: loading,
             title: t('files.up'),
             'aria-label': t('files.up'),
-          }, '↑'),
+          }, h(UpIcon)),
           h('button', {
             type: 'button',
             className: 'ssc-btn ssc-btn-quiet ssc-path-btn',
@@ -1448,7 +1512,7 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
             disabled: loading,
             title: t('files.home'),
             'aria-label': t('files.home'),
-          }, '~'),
+          }, h(HomeIcon)),
           editing
             ? h('input', {
               className: 'ssc-path-input',
@@ -1502,7 +1566,7 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
             onClick: beginEdit,
             title: t('files.edit'),
             'aria-label': t('files.edit'),
-          }, '✎'),
+          }, h(PencilIcon)),
           h('button', {
             type: 'button',
             className: 'ssc-btn ssc-btn-quiet ssc-path-btn',
@@ -1510,7 +1574,7 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
             disabled: loading,
             title: t('files.refresh'),
             'aria-label': t('files.refresh'),
-          }, '⟳')),
+          }, h(RefreshIcon))),
         failure.length > 0 ? h('div', { className: 'ssc-hint ssc-fail', role: 'alert' }, failure) : null,
         loading && listing === null ? h('div', { className: 'ssc-empty' }, h('span', null, t('files.loading'))) : null,
         listing !== null && listing.entries.length === 0
