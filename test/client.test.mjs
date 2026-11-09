@@ -1028,6 +1028,95 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   assert.ok(!/\.ssc-path-btn\{[^}]*font-size/u.test(css),
     'the toolbar button no longer sizes a font glyph')
   console.log('ok 21 - the file toolbar icons are one drawn set, so they line up by construction')
+
+  /* ------------------------- the disk card shows every real filesystem */
+
+  // The regression: the overview card read `snapshot.disk`, which the probe filled
+  // from `df -P -h /`. On a GPU server `/` is a small system disk that never moves
+  // while the data volume sits at 99%, so the one number on screen said "38%" at
+  // exactly the moment the disk that matters was full.
+  //
+  // The component is executed rather than pattern-matched: what has to hold is the
+  // rendered tree — one row per mount, the fullest one as the headline, and the bar
+  // tracking that same number.
+  const diskFactory = new Function(
+    'h',
+    `${blockOf(source, 'toneClass')}\n${blockOf(source, 'DiskCard')}\nreturn DiskCard`,
+  )
+  const diskCard = diskFactory(fakeElement)
+  const diskText = (node) => {
+    if (node === null || node === undefined || typeof node === 'boolean') return ''
+    if (typeof node === 'string' || typeof node === 'number') return String(node)
+    if (Array.isArray(node)) return node.map(diskText).join(' ')
+    if (typeof node !== 'object') return ''
+    return diskText(node.children)
+  }
+
+  const mounts = [
+    { filesystem: '/dev/sda1', size: '91T', used: '90T', available: '1.1T', usedPercent: 99, mount: '/home' },
+    { filesystem: '/dev/sda2', size: '98G', used: '38G', available: '55G', usedPercent: 41, mount: '/' },
+    { filesystem: '/dev/nvme0n1', size: '3.5T', used: '1.2T', available: '2.3T', usedPercent: 35, mount: '/data' },
+  ]
+  const card = diskCard({ disk: { mounts }, t: (key) => key })
+
+  const rows = []
+  const walk = (node) => {
+    if (node === null || node === undefined) return
+    if (Array.isArray(node)) { node.forEach(walk); return }
+    if (typeof node !== 'object') return
+    if (node.props?.className === 'ssc-mount') rows.push(node)
+    walk(node.children)
+  }
+  walk(card)
+
+  assert.equal(rows.length, 3, 'every real filesystem gets a row, not only the first')
+  assert.deepEqual(rows.map((row) => diskText(row).trim()), ['/home 99%', '/ 41%', '/data 35%'],
+    'each row names its mount and its percentage, fullest first')
+  assert.equal(rows[0].props.title, '/dev/sda1 · 90T / 91T · 1.1T free',
+    'the row tooltip carries the device and the raw figures')
+
+  // The headline is the fullest mount — the one that fails first — and the bar is
+  // the same number, so the card cannot contradict itself.
+  assert.ok(diskText(card).includes('90T / 91T'), 'the headline is the fullest mount, not the root')
+  const bar = /className: 'ssc-bar'/u.test(blockOf(source, 'DiskCard'))
+  assert.ok(bar, 'the headline keeps a bar')
+  const diskBars = []
+  const collectBars = (node) => {
+    if (node === null || node === undefined) return
+    if (Array.isArray(node)) { node.forEach(collectBars); return }
+    if (typeof node !== 'object') return
+    if (node.props?.className === 'ssc-bar') diskBars.push(node)
+    collectBars(node.children)
+  }
+  collectBars(card)
+  assert.equal(diskBars.length, 1, 'one bar, for the headline figure')
+  const fill = diskBars[0].children[0]
+  assert.equal(fill.props.style.width, '99%', 'the bar tracks the fullest mount')
+  assert.equal(fill.props.className, 'ssc-hot', 'a nearly full volume is painted as hot')
+
+  // A host where df failed must read as unknown, not as a comfortable 0%.
+  const empty = diskCard({ disk: undefined, t: (key) => key })
+  assert.ok(diskText(empty).includes('—'), 'no snapshot reads as a dash')
+  const emptyRows = []
+  const walkEmpty = (node) => {
+    if (node === null || node === undefined) return
+    if (Array.isArray(node)) { node.forEach(walkEmpty); return }
+    if (typeof node !== 'object') return
+    if (node.props?.className === 'ssc-mount') emptyRows.push(node)
+    walkEmpty(node.children)
+  }
+  walkEmpty(empty)
+  assert.equal(emptyRows.length, 0, 'and draws no phantom mount rows')
+
+  // The card is what the overview renders, not a component nobody calls.
+  assert.ok(/h\(DiskCard, \{ disk: snapshot\.disk, t \}\)/u.test(source),
+    'the overview renders DiskCard with the live snapshot')
+  assert.ok(!/snapshot\.disk\.usedPercent/u.test(source),
+    'nothing still reads the single-disk field directly')
+  for (const rule of ['.ssc-mounts{', '.ssc-mount{', '.ssc-mount-name{', '.ssc-mount-pct{']) {
+    assert.ok(css.includes(rule), `the stylesheet carries ${rule}`)
+  }
+  console.log('ok 22 - the disk card lists every filesystem and leads with the fullest')
 }
 
 console.log('\nall client harness checks passed')

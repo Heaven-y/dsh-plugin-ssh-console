@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { SshConsoleService, clampNumber, parsePortStrict } from '../index.js'
+import { SshConsoleService, clampNumber, parseDiskTable, parsePortStrict } from '../index.js'
 
 /**
  * Every scratch directory this run creates.
@@ -123,6 +123,60 @@ await assert.rejects(
   'a blank command is refused',
 )
 console.log('ok 2 - unconnected and invalid calls fail with marked codes')
+
+/* ------------------------------------------------------------- the disk table */
+
+// The regression: the probe asked `df -P -h /`, so only the root filesystem was
+// ever read. On a host with a separate data volume that reports a comfortable `/`
+// while `/home` sits at 99% — the number nobody sees is the one that matters.
+//
+// The parser is exercised directly on `df -P -h` output copied from a real box,
+// because the shape of that text (a translated header, long device names, spaces
+// in mount points) is the whole problem.
+//
+// This check lives ABOVE the live section on purpose. Everything below the first
+// connection attempt is skipped with `process.exit(0)` when the remote is
+// unreachable, and a pure parser test has no business depending on a network.
+{
+  const table = parseDiskTable([
+    'Filesystem      Size  Used Avail Use% Mounted on',
+    '/dev/sda2        98G   38G   55G  41% /',
+    '/dev/sda1        91T   90T  1.1T  99% /home',
+    'tmpfs           126G   12M  126G   1% /dev/shm',
+    'overlay          98G   38G   55G  41% /var/lib/docker/overlay2/abc',
+    '/dev/nvme0n1    3.5T  1.2T  2.3T  35% /data',
+  ])
+
+  assert.equal(table.length, 3, 'the header, tmpfs and overlay are not filesystems')
+  assert.deepEqual(table.map((entry) => entry.mount), ['/home', '/', '/data'],
+    'fullest first, so the card leads with the one about to fill')
+  assert.equal(table[0].usedPercent, 99, 'the data volume reports 99%')
+  assert.equal(table[0].filesystem, '/dev/sda1')
+  assert.equal(table[0].used, '90T')
+  assert.equal(table[0].size, '91T')
+  assert.equal(table[0].available, '1.1T')
+
+  // A mount point may contain spaces; the fifth column is the last fixed one.
+  const spaced = parseDiskTable([
+    'Filesystem Size Used Avail Use% Mounted on',
+    '/dev/sdb1  10G  5G  5G  50% /mnt/my disk',
+  ])
+  assert.equal(spaced[0].mount, '/mnt/my disk', 'a mount point with a space survives')
+
+  // No header, no rows: a host where df failed must not become a fake 0% disk.
+  assert.deepEqual(parseDiskTable([]), [], 'empty output yields no mounts')
+  assert.deepEqual(parseDiskTable(['', '   ']), [], 'blank lines are skipped')
+
+  // The same device mounted twice is two real mounts, not a duplicate line.
+  const twice = parseDiskTable([
+    'Filesystem Size Used Avail Use% Mounted on',
+    '/dev/sdc1  100G  50G  50G  50% /srv',
+    '/dev/sdc1  100G  50G  50G  50% /srv',
+  ])
+  assert.equal(twice.length, 1, 'an exact repeat of device and mount is dropped')
+
+  console.log('ok 2b - the disk table sees every real filesystem, not just the root')
+}
 
 /* ------------------------------------------------------------------- live */
 

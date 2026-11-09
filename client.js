@@ -155,6 +155,12 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
 .ssc-card-label{color:var(--dsw-alias-label-secondary);font-size:11px;letter-spacing:.04em;text-transform:uppercase}
 .ssc-card-value{font-size:19px;line-height:25px;font-weight:600;font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ssc-card-sub{color:var(--dsw-alias-label-secondary);font-size:11px;font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* One line per real filesystem. A host often has a small root volume plus a data
+   volume somewhere else; showing only the first hid the one that fills up. */
+.ssc-mounts{display:flex;flex-direction:column;gap:2px;min-width:0}
+.ssc-mount{display:flex;align-items:baseline;gap:8px;min-width:0;font-size:11px;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary)}
+.ssc-mount-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.ssc-mount-pct{flex:none}
 .ssc-bar{position:relative;height:4px;border-radius:2px;background:var(--dsw-alias-border-l1);overflow:hidden}
 .ssc-bar>i{position:absolute;inset:0 auto 0 0;border-radius:2px;background:var(--dsw-alias-brand-primary);transition:width .25s ease}
 .ssc-bar>i.ssc-warn{background:var(--dsw-alias-state-warn-primary)}
@@ -822,6 +828,45 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
     }
 
     /**
+     * The disk card: the fullest filesystem as the headline, every real mount
+     * listed underneath.
+     *
+     * Sampling only `/` was the bug this replaces. On a machine with a separate
+     * data volume — the normal layout on a GPU server — `/` is a system disk that
+     * never moves, while `/home` quietly reaches 99%. One number from `/` reads as
+     * "plenty of space" at exactly the moment the data volume is full.
+     *
+     * The headline is the fullest mount because that is the one that will fail
+     * first; the list is what makes the choice auditable rather than a guess.
+     * @param props - the disk snapshot and the locale lookup.
+     * @returns the card.
+     */
+    function DiskCard({ disk, t }) {
+      const mounts = disk?.mounts ?? []
+      const primary = mounts.length > 0 ? mounts[0] : undefined
+      return h('div', { className: 'ssc-card' },
+        h('span', { className: 'ssc-card-label' }, t('disk')),
+        h('span', { className: 'ssc-card-value' },
+          primary === undefined ? '—' : `${primary.used} / ${primary.size}`),
+        primary === undefined
+          ? null
+          : h('div', { className: 'ssc-bar' },
+            h('i', {
+              className: toneClass(primary.usedPercent),
+              style: { width: `${Math.max(0, Math.min(100, primary.usedPercent))}%` },
+            })),
+        mounts.length === 0
+          ? null
+          : h('div', { className: 'ssc-mounts' }, mounts.map((entry) => h('span', {
+            key: `${entry.filesystem}\u0000${entry.mount}`,
+            className: 'ssc-mount',
+            title: `${entry.filesystem} · ${entry.used} / ${entry.size} · ${entry.available} free`,
+          },
+          h('span', { className: 'ssc-mount-name' }, entry.mount),
+          h('span', { className: 'ssc-mount-pct' }, `${entry.usedPercent}%`)))))
+    }
+
+    /**
      * One GPU device card in the style of nvitop's device row.
      *
      * Utilization and memory each get their own bar directly under their own
@@ -908,14 +953,7 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
                   ? undefined
                   : `${t('uptime')} ${formatDuration(snapshot.uptimeSeconds * 1000)}`,
               }),
-              h(StatCard, {
-                label: t('disk'),
-                value: snapshot.disk === undefined ? '—' : `${snapshot.disk.usedPercent}%`,
-                sub: snapshot.disk === undefined
-                  ? undefined
-                  : `${snapshot.disk.filesystem} · ${snapshot.disk.used} / ${snapshot.disk.size}`,
-                percent: snapshot.disk === undefined ? undefined : snapshot.disk.usedPercent,
-              })),
+              h(DiskCard, { disk: snapshot.disk, t })),
             h('div', { className: 'ssc-section' },
               h('div', { className: 'ssc-section-head' },
                 h('h4', { className: 'ssc-section-title' }, t('gpu')),

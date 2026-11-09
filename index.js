@@ -937,6 +937,67 @@ function parseMemory(lines) {
 }
 
 /**
+ * Filesystem names that are not backed by a device worth reporting.
+ *
+ * `df -P -h` lists ~20 of these on a normal Linux box: memory-backed mounts,
+ * container overlays, snap images, kernel interfaces. Showing them next to a real
+ * data volume is noise, and on a container host they outnumber the real disks.
+ * The list is matched against the *device* column, which is what these names
+ * always appear as.
+ */
+const PSEUDO_FILESYSTEMS = new Set([
+  'tmpfs', 'devtmpfs', 'devfs', 'udev', 'none', 'overlay', 'squashfs', 'ramfs',
+  'efivarfs', 'proc', 'sysfs', 'devpts', 'mqueue', 'hugetlbfs', 'debugfs',
+  'tracefs', 'securityfs', 'pstore', 'bpf', 'configfs', 'fusectl', 'autofs',
+  'binfmt_misc', 'nsfs', 'cgroup', 'cgroup2', 'systemd-1',
+])
+
+/**
+ * Turn `df -P -h` output into the list of real filesystems behind it.
+ *
+ * `-P` guarantees one line per filesystem in a fixed six-column layout, which is
+ * why this parses by splitting instead of by column position: it stays correct
+ * for both `df -h` and `df -k` shapes. The percentage column is the field that
+ * identifies a data line — it is the only one that always ends in `%`, so the
+ * header is skipped without needing to string-match its translated text.
+ *
+ * Sorted fullest-first. The overview card shows the first entry as its headline,
+ * and the mount closest to full is the one worth a second look.
+ * @param lines - the `###DISK` section, one line per filesystem.
+ * @returns the real filesystems, fullest first.
+ */
+function parseDiskTable(lines) {
+  const mounts = []
+  const seen = new Set()
+  for (const raw of lines) {
+    const line = raw.trim()
+    if (line.length === 0) continue
+    const fields = line.split(/\s+/)
+    if (fields.length < 6) continue
+    if (!/^\d+%$/u.test(fields[4])) continue
+    const [filesystem, size, used, available] = fields
+    if (PSEUDO_FILESYSTEMS.has(filesystem.toLowerCase())) continue
+    // A mount point may contain spaces; everything after the fifth column is it.
+    const mount = fields.slice(5).join(' ')
+    // The same device can appear twice for bind mounts and btrfs subvolumes. They
+    // are genuinely separate mounts, so only an exact repeat is dropped.
+    const key = `${filesystem}\u0000${mount}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    mounts.push({
+      filesystem,
+      size,
+      used,
+      available,
+      usedPercent: Number.parseInt(fields[4], 10) || 0,
+      mount,
+    })
+  }
+  mounts.sort((a, b) => b.usedPercent - a.usedPercent || a.mount.localeCompare(b.mount))
+  return mounts
+}
+
+/**
  * Whether a path is already a clean absolute path that needs no resolution.
  *
  * `realpath` is a round trip. Clicking a folder in the browser produces
@@ -1048,7 +1109,11 @@ const METRICS_SCRIPT = [
   'apppids=$(printf "%s\\n" "$gpuapps" | cut -d, -f1 | tr -d " " | sed "/^$/d" | paste -sd, -); '
     + '[ -n "$apppids" ] && ps -o pid=,user=,args= -p "$apppids" 2>/dev/null',
   'echo "###DISK"',
-  'df -P -h / 2>/dev/null | tail -n 1',
+  // Every real filesystem, not just `/`. On a machine with a separate data
+  // volume — the usual layout on a GPU server — `/` is a small system disk and
+  // the disk that actually fills up is somewhere else. Sampling only `/` shows a
+  // comfortable percentage while the volume holding the user's data sits at 99%.
+  'df -P -h 2>/dev/null',
   'echo "###TOP"',
   'ps -eo pid,ppid,user,pcpu,pmem,etime,stat,nlwp,rss,args --sort=-pcpu 2>/dev/null | head -n 21',
   'echo "###END"',
@@ -2213,8 +2278,8 @@ class SshConsoleService {
       device.processMemoryMiB = mine.reduce((sum, process) => sum + (process.usedMiB ?? 0), 0)
     }
 
-    const diskText = sectionLine(sections, 'DISK')
-    const diskFields = diskText.split(/\s+/)
+    const diskText = sectionLines(sections, 'DISK')
+    const disks = parseDiskTable(diskText)
 
     return {
       sampledAt: Date.now(),
@@ -2229,14 +2294,18 @@ class SshConsoleService {
       memory: parseMemory(sectionLines(sections, 'MEM')),
       gpu: { supported: gpuSupported, devices: gpus },
       gpuProcesses,
-      disk: diskFields.length >= 6
+      disk: disks.length > 0
+        // `mounts` is the whole truth; the flattened fields describe the fullest
+        // one, which is what the card's headline shows. Reading both keeps the
+        // card honest when a host has more than one real filesystem.
         ? {
-          filesystem: diskFields[0],
-          size: diskFields[1],
-          used: diskFields[2],
-          available: diskFields[3],
-          usedPercent: Number.parseInt(diskFields[4], 10) || 0,
-          mount: diskFields[5],
+          mounts: disks,
+          filesystem: disks[0].filesystem,
+          size: disks[0].size,
+          used: disks[0].used,
+          available: disks[0].available,
+          usedPercent: disks[0].usedPercent,
+          mount: disks[0].mount,
         }
         : undefined,
       processes,
@@ -2736,6 +2805,7 @@ export {
   cleanLabel,
   cleanUser,
   clampNumber,
+  parseDiskTable,
   parsePortStrict,
   parseSshConfig,
   readSshConfigHosts,
