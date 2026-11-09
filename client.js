@@ -155,12 +155,21 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
 .ssc-card-label{color:var(--dsw-alias-label-secondary);font-size:11px;letter-spacing:.04em;text-transform:uppercase}
 .ssc-card-value{font-size:19px;line-height:25px;font-weight:600;font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ssc-card-sub{color:var(--dsw-alias-label-secondary);font-size:11px;font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* One line per real filesystem. A host often has a small root volume plus a data
-   volume somewhere else; showing only the first hid the one that fills up. */
-.ssc-mounts{display:flex;flex-direction:column;gap:2px;min-width:0}
-.ssc-mount{display:flex;align-items:baseline;gap:8px;min-width:0;font-size:11px;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary)}
-.ssc-mount-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-.ssc-mount-pct{flex:none}
+/* One row per real filesystem, each with its own bar. A host often has a small
+   root volume plus a data volume somewhere else, and which one matters differs by
+   machine — so every mount is shown, and none is promoted to a headline.
+   The card spans the whole row and lays its mounts out in columns: left in the
+   180px grid cell a four-mount host made the card 226px tall, which stretched the
+   three single-figure cards beside it to match and left 125px of dead space in
+   each. Across the full row the same four mounts fit in 85px. */
+.ssc-card-disk{grid-column:1/-1}
+.ssc-card-disk .ssc-mounts{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
+.ssc-mounts{display:flex;flex-direction:column;gap:8px;min-width:0}
+.ssc-mount{display:flex;flex-direction:column;gap:3px;min-width:0}
+.ssc-mount-head{display:flex;align-items:baseline;gap:8px;min-width:0}
+.ssc-mount-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;color:var(--dsw-alias-label-primary)}
+.ssc-mount-pct{flex:none;font-size:11.5px;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary)}
+.ssc-mount-figures{font-size:10.5px;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary)}
 .ssc-bar{position:relative;height:4px;border-radius:2px;background:var(--dsw-alias-border-l1);overflow:hidden}
 .ssc-bar>i{position:absolute;inset:0 auto 0 0;border-radius:2px;background:var(--dsw-alias-brand-primary);transition:width .25s ease}
 .ssc-bar>i.ssc-warn{background:var(--dsw-alias-state-warn-primary)}
@@ -828,42 +837,49 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
     }
 
     /**
-     * The disk card: the fullest filesystem as the headline, every real mount
-     * listed underneath.
+     * The disk card: every real filesystem, one row each.
      *
-     * Sampling only `/` was the bug this replaces. On a machine with a separate
-     * data volume — the normal layout on a GPU server — `/` is a system disk that
-     * never moves, while `/home` quietly reaches 99%. One number from `/` reads as
-     * "plenty of space" at exactly the moment the data volume is full.
+     * Two things were wrong with the card this replaces. It sampled only `/`, so
+     * on a GPU server — where `/` is a small system disk and the data volume lives
+     * at `/home` — it reported a comfortable percentage while the volume that
+     * actually fills up sat at 99%. And when it was widened to read every mount it
+     * still showed a single headline taken from the fullest one, which is a guess
+     * about which filesystem this particular host cares about: on one machine `/`
+     * is the one that grows, on the next it is `/home`, and no rule picks right
+     * for both.
      *
-     * The headline is the fullest mount because that is the one that will fail
-     * first; the list is what makes the choice auditable rather than a guess.
+     * So there is no headline. Each mount gets a row with its own bar and its own
+     * figures, and the rows are ordered fullest-first because that is the order a
+     * reader scans in.
+     *
+     * The card spans the full grid row (`ssc-card-disk`) rather than sitting in one
+     * 180px cell. Measured with a real four-mount host: inside a cell the card was
+     * 226px tall and stretched the three single-figure cards beside it to the same
+     * height, leaving 125px of dead space in each; across the row the mounts lay
+     * out in four columns and the card is 85px.
      * @param props - the disk snapshot and the locale lookup.
      * @returns the card.
      */
     function DiskCard({ disk, t }) {
       const mounts = disk?.mounts ?? []
-      const primary = mounts.length > 0 ? mounts[0] : undefined
-      return h('div', { className: 'ssc-card' },
+      return h('div', { className: 'ssc-card ssc-card-disk' },
         h('span', { className: 'ssc-card-label' }, t('disk')),
-        h('span', { className: 'ssc-card-value' },
-          primary === undefined ? '—' : `${primary.used} / ${primary.size}`),
-        primary === undefined
-          ? null
-          : h('div', { className: 'ssc-bar' },
-            h('i', {
-              className: toneClass(primary.usedPercent),
-              style: { width: `${Math.max(0, Math.min(100, primary.usedPercent))}%` },
-            })),
         mounts.length === 0
-          ? null
-          : h('div', { className: 'ssc-mounts' }, mounts.map((entry) => h('span', {
+          ? h('span', { className: 'ssc-card-value' }, '—')
+          : h('div', { className: 'ssc-mounts' }, mounts.map((entry) => h('div', {
             key: `${entry.filesystem}\u0000${entry.mount}`,
             className: 'ssc-mount',
             title: `${entry.filesystem} · ${entry.used} / ${entry.size} · ${entry.available} free`,
           },
-          h('span', { className: 'ssc-mount-name' }, entry.mount),
-          h('span', { className: 'ssc-mount-pct' }, `${entry.usedPercent}%`)))))
+          h('div', { className: 'ssc-mount-head' },
+            h('span', { className: 'ssc-mount-name' }, entry.mount),
+            h('span', { className: 'ssc-mount-pct' }, `${entry.usedPercent}%`)),
+          h('div', { className: 'ssc-bar' },
+            h('i', {
+              className: toneClass(entry.usedPercent),
+              style: { width: `${Math.max(0, Math.min(100, entry.usedPercent))}%` },
+            })),
+          h('span', { className: 'ssc-mount-figures' }, `${entry.used} / ${entry.size}`)))))
     }
 
     /**

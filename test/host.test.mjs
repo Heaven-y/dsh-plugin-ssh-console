@@ -175,6 +175,53 @@ console.log('ok 2 - unconnected and invalid calls fail with marked codes')
   ])
   assert.equal(twice.length, 1, 'an exact repeat of device and mount is dropped')
 
+  // Snap packages are loop-mounted squashfs images, which are read-only and sized
+  // to the image — so every one of them reports 100% used forever. A host with a
+  // dozen snaps would otherwise have the card lead with `/snap/core20/1974 100%`
+  // and hide the data volume that is actually filling up. This is not theoretical:
+  // it was measured on the card before the filter existed.
+  const snaps = parseDiskTable([
+    'Filesystem      Size  Used Avail Use% Mounted on',
+    '/dev/loop0       64M   64M     0 100% /snap/core20/1974',
+    '/dev/loop1       74M   74M     0 100% /snap/lxd/24322',
+    '/dev/loop2       50M   50M     0 100% /snap/snapd/20092',
+    '/dev/sda2        98G   38G   55G  41% /',
+    '/dev/sda1        91T   90T  1.1T  99% /home',
+  ])
+  assert.deepEqual(snaps.map((entry) => entry.mount), ['/home', '/'],
+    'a snap image is not a disk, however full it says it is')
+  assert.ok(snaps.every((entry) => !entry.filesystem.startsWith('/dev/loop')),
+    'and no loop device survives the filter')
+
+  // A device name that merely starts with the same letters is still a real disk.
+  const named = parseDiskTable([
+    'Filesystem      Size  Used Avail Use% Mounted on',
+    '/dev/loopback99  100G  50G  50G  50% /mnt/odd',
+    '/dev/sdc1        100G  50G  50G  50% /srv',
+  ])
+  assert.deepEqual(named.map((entry) => entry.mount), ['/mnt/odd', '/srv'],
+    'the loop pattern is anchored, so it does not eat a real device name')
+
+  // Real `df -P -h` output from three configured machines, kept verbatim so the
+  // parser is exercised on what this fleet actually prints: a container-free GPU
+  // box, one with `/` at 93%, and one where the data volume is a separate 305T
+  // array. Each line here is one of them, trimmed to the filesystems that matter.
+  const fleet = parseDiskTable([
+    // liujx-AS-4125GS-TNRT: the root is the system disk, /home is the data volume.
+    'Filesystem      Size  Used Avail Use% Mounted on',
+    'tmpfs           101G  6.1M  101G   1% /run',
+    '/dev/nvme0n1p4  845G  745G   58G  93% /',
+    'tmpfs           504G     0  504G   0% /dev/shm',
+    'efivarfs        128K   54K   70K  44% /sys/firmware/efi/efivars',
+    '/dev/nvme0n1p1  3.7G  206M  3.3G   6% /boot',
+    '/dev/nvme0n1p2  1.1G  6.2M  1.1G   1% /boot/efi',
+    '/dev/sda1        91T   91T   23G 100% /home',
+    'tmpfs           101G  100K  101G   1% /run/user/1014',
+  ])
+  assert.deepEqual(fleet.map((entry) => `${entry.mount} ${entry.usedPercent}%`),
+    ['/home 100%', '/ 93%', '/boot 6%', '/boot/efi 1%'],
+    'every real filesystem is reported, and the boot partitions are not hidden')
+
   console.log('ok 2b - the disk table sees every real filesystem, not just the root')
 }
 

@@ -1031,14 +1031,17 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
 
   /* ------------------------- the disk card shows every real filesystem */
 
-  // The regression: the overview card read `snapshot.disk`, which the probe filled
-  // from `df -P -h /`. On a GPU server `/` is a small system disk that never moves
-  // while the data volume sits at 99%, so the one number on screen said "38%" at
-  // exactly the moment the disk that matters was full.
+  // Two regressions, one card. It first read `snapshot.disk`, which the probe
+  // filled from `df -P -h /`, so on a GPU server `/` reported 44% while `/home`
+  // sat at 99%. Then it read every mount but still promoted one to a headline —
+  // and "the fullest one" is a guess about which filesystem this host cares
+  // about. Measured on three real machines: `/home` was the fullest on two of
+  // them and `/` on the third, and a snap loop device reporting a permanent 100%
+  // would have won on any Ubuntu box.
   //
-  // The component is executed rather than pattern-matched: what has to hold is the
-  // rendered tree — one row per mount, the fullest one as the headline, and the bar
-  // tracking that same number.
+  // So the contract is now: no headline, one row per mount, each with its own bar
+  // and its own figures. The component is executed rather than pattern-matched,
+  // because what has to hold is the rendered tree.
   const diskFactory = new Function(
     'h',
     `${blockOf(source, 'toneClass')}\n${blockOf(source, 'DiskCard')}\nreturn DiskCard`,
@@ -1051,6 +1054,17 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
     if (typeof node !== 'object') return ''
     return diskText(node.children)
   }
+  const collect = (node, className) => {
+    const found = []
+    const walk = (current) => {
+      if (current === null || current === undefined || typeof current !== 'object') return
+      if (Array.isArray(current)) { current.forEach(walk); return }
+      if (current.props?.className === className) found.push(current)
+      walk(current.children)
+    }
+    walk(node)
+    return found
+  }
 
   const mounts = [
     { filesystem: '/dev/sda1', size: '91T', used: '90T', available: '1.1T', usedPercent: 99, mount: '/home' },
@@ -1059,64 +1073,57 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   ]
   const card = diskCard({ disk: { mounts }, t: (key) => key })
 
-  const rows = []
-  const walk = (node) => {
-    if (node === null || node === undefined) return
-    if (Array.isArray(node)) { node.forEach(walk); return }
-    if (typeof node !== 'object') return
-    if (node.props?.className === 'ssc-mount') rows.push(node)
-    walk(node.children)
-  }
-  walk(card)
-
+  const rows = collect(card, 'ssc-mount')
   assert.equal(rows.length, 3, 'every real filesystem gets a row, not only the first')
-  assert.deepEqual(rows.map((row) => diskText(row).trim()), ['/home 99%', '/ 41%', '/data 35%'],
-    'each row names its mount and its percentage, fullest first')
+  assert.deepEqual(rows.map((row) => diskText(row).replace(/\s+/gu, ' ').trim()),
+    ['/home 99% 90T / 91T', '/ 41% 38G / 98G', '/data 35% 1.2T / 3.5T'],
+    'each row carries its mount, its percentage and its own figures')
   assert.equal(rows[0].props.title, '/dev/sda1 · 90T / 91T · 1.1T free',
     'the row tooltip carries the device and the raw figures')
 
-  // The headline is the fullest mount — the one that fails first — and the bar is
-  // the same number, so the card cannot contradict itself.
-  assert.ok(diskText(card).includes('90T / 91T'), 'the headline is the fullest mount, not the root')
-  const bar = /className: 'ssc-bar'/u.test(blockOf(source, 'DiskCard'))
-  assert.ok(bar, 'the headline keeps a bar')
-  const diskBars = []
-  const collectBars = (node) => {
-    if (node === null || node === undefined) return
-    if (Array.isArray(node)) { node.forEach(collectBars); return }
-    if (typeof node !== 'object') return
-    if (node.props?.className === 'ssc-bar') diskBars.push(node)
-    collectBars(node.children)
-  }
-  collectBars(card)
-  assert.equal(diskBars.length, 1, 'one bar, for the headline figure')
-  const fill = diskBars[0].children[0]
-  assert.equal(fill.props.style.width, '99%', 'the bar tracks the fullest mount')
-  assert.equal(fill.props.className, 'ssc-hot', 'a nearly full volume is painted as hot')
+  // One bar per mount, each tracking its own row. A single bar under a list of
+  // three filesystems was the shape that made the card lie: it said 99% while
+  // sitting under a row about `/`.
+  const bars = collect(card, 'ssc-bar')
+  assert.equal(bars.length, 3, 'each row draws its own bar')
+  assert.deepEqual(bars.map((bar) => bar.children[0].props.style.width), ['99%', '41%', '35%'],
+    'each bar tracks its own mount, not a shared headline')
+  assert.deepEqual(bars.map((bar) => bar.children[0].props.className), ['ssc-hot', '', ''],
+    'only the volume that is nearly full is painted as hot')
+
+  // No headline: the card has no `.ssc-card-value` at all when there are mounts,
+  // because a single big number is exactly the claim it can no longer make.
+  assert.equal(collect(card, 'ssc-card-value').length, 0,
+    'no single number is promoted to a headline')
 
   // A host where df failed must read as unknown, not as a comfortable 0%.
   const empty = diskCard({ disk: undefined, t: (key) => key })
   assert.ok(diskText(empty).includes('—'), 'no snapshot reads as a dash')
-  const emptyRows = []
-  const walkEmpty = (node) => {
-    if (node === null || node === undefined) return
-    if (Array.isArray(node)) { node.forEach(walkEmpty); return }
-    if (typeof node !== 'object') return
-    if (node.props?.className === 'ssc-mount') emptyRows.push(node)
-    walkEmpty(node.children)
-  }
-  walkEmpty(empty)
-  assert.equal(emptyRows.length, 0, 'and draws no phantom mount rows')
+  assert.equal(collect(empty, 'ssc-mount').length, 0, 'and draws no phantom mount rows')
+  assert.equal(collect(empty, 'ssc-bar').length, 0, 'nor a bar at zero')
 
   // The card is what the overview renders, not a component nobody calls.
   assert.ok(/h\(DiskCard, \{ disk: snapshot\.disk, t \}\)/u.test(source),
     'the overview renders DiskCard with the live snapshot')
   assert.ok(!/snapshot\.disk\.usedPercent/u.test(source),
     'nothing still reads the single-disk field directly')
-  for (const rule of ['.ssc-mounts{', '.ssc-mount{', '.ssc-mount-name{', '.ssc-mount-pct{']) {
+
+  // The card spans the grid row instead of taking one 180px cell. Measured with a
+  // real four-mount host: inside a cell it was 226px tall and stretched the three
+  // single-figure cards beside it to match, leaving 125px of dead space in each;
+  // across the row its mounts lay out in columns and it is 85px.
+  assert.ok(/className: 'ssc-card ssc-card-disk'/u.test(blockOf(source, 'DiskCard')),
+    'the disk card carries the modifier that spans the row')
+  assert.ok(/\.ssc-card-disk\{grid-column:1\/-1\}/u.test(css),
+    'and the modifier actually spans every column of the grid')
+  assert.ok(/\.ssc-card-disk \.ssc-mounts\{[^}]*grid-template-columns/u.test(css),
+    'the mounts lay out in columns, which is what makes the row span pay off')
+
+  for (const rule of ['.ssc-mounts{', '.ssc-mount{', '.ssc-mount-head{', '.ssc-mount-name{',
+    '.ssc-mount-pct{', '.ssc-mount-figures{']) {
     assert.ok(css.includes(rule), `the stylesheet carries ${rule}`)
   }
-  console.log('ok 22 - the disk card lists every filesystem and leads with the fullest')
+  console.log('ok 22 - the disk card lists every filesystem with its own bar, and no headline')
 }
 
 console.log('\nall client harness checks passed')

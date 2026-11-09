@@ -953,6 +953,20 @@ const PSEUDO_FILESYSTEMS = new Set([
 ])
 
 /**
+ * Devices that are real block devices but still not disks to worry about.
+ *
+ * Snap packages are loop-mounted squashfs images, and squashfs is read-only and
+ * sized to the image, so every one of them reports 100% used for as long as it is
+ * installed. A host with a dozen snaps — every Ubuntu desktop, and plenty of
+ * servers — would have the disk card lead with `/snap/core20/1974 100%` and hide
+ * the data volume that is actually filling up. Matching the device name rather
+ * than the mount point also catches the same images under a custom snap dir.
+ */
+const PSEUDO_DEVICE_PATTERNS = [
+  /^\/dev\/loop\d+$/u,
+]
+
+/**
  * Turn `df -P -h` output into the list of real filesystems behind it.
  *
  * `-P` guarantees one line per filesystem in a fixed six-column layout, which is
@@ -961,8 +975,9 @@ const PSEUDO_FILESYSTEMS = new Set([
  * identifies a data line — it is the only one that always ends in `%`, so the
  * header is skipped without needing to string-match its translated text.
  *
- * Sorted fullest-first. The overview card shows the first entry as its headline,
- * and the mount closest to full is the one worth a second look.
+ * Sorted fullest-first. Every caller wants the mounts that are close to full
+ * before the ones that are not, and the order is stable so a card does not
+ * reshuffle between two samples that read the same percentages.
  * @param lines - the `###DISK` section, one line per filesystem.
  * @returns the real filesystems, fullest first.
  */
@@ -977,6 +992,7 @@ function parseDiskTable(lines) {
     if (!/^\d+%$/u.test(fields[4])) continue
     const [filesystem, size, used, available] = fields
     if (PSEUDO_FILESYSTEMS.has(filesystem.toLowerCase())) continue
+    if (PSEUDO_DEVICE_PATTERNS.some((pattern) => pattern.test(filesystem))) continue
     // A mount point may contain spaces; everything after the fifth column is it.
     const mount = fields.slice(5).join(' ')
     // The same device can appear twice for bind mounts and btrfs subvolumes. They
