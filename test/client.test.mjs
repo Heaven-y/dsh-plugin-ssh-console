@@ -1269,16 +1269,19 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
       'and it is the only card that does — the others are self-explanatory')
 
     // The dictionary entries are required by the locale check above; here the
-    // content is checked, because a tooltip that says nothing useful is worse than
-    // none: it has to cover what the numbers are, the per-core division, and how
-    // to read them.
+    // content is checked. The tooltip is deliberately one sentence: it says what
+    // the three numbers are and nothing else, because the per-core reading is
+    // already on the card face (`1m · 5m · 15m · 0.59/核`) and a wall of text in a
+    // tooltip is worse than a short one. It has to stay a tooltip, not an essay.
     for (const localeId of ['zh', 'en']) {
       const hint = dictionaries[0].dicts[localeId]['load.hint']
-      assert.ok(hint.length > 80, `${localeId}.load.hint says something substantial`)
+      assert.ok(hint.length >= 30, `${localeId}.load.hint says enough to be useful`)
+      assert.ok(hint.length <= 120, `${localeId}.load.hint stays one short sentence (${hint.length} chars)`)
+      assert.equal(hint.split('\n').length, 1, `${localeId}.load.hint is a single line`)
       for (const idea of ['1', '5', '15']) {
         assert.ok(hint.includes(idea), `${localeId}.load.hint names the ${idea} minute window`)
       }
-      assert.ok(/core|核/u.test(hint), `${localeId}.load.hint mentions the core count`)
+      assert.ok(/CPU/u.test(hint), `${localeId}.load.hint says what is being waited for`)
     }
   }
 
