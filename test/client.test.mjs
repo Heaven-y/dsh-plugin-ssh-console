@@ -1101,13 +1101,38 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
     { filesystem: '/dev/sda2', size: '98G', used: '38G', available: '55G', usedPercent: 41, mount: '/' },
     { filesystem: '/dev/nvme0n1', size: '3.5T', used: '1.2T', available: '2.3T', usedPercent: 35, mount: '/data' },
   ]
-  const card = diskCard({ disk: { mounts }, t: (key) => key })
+  const t = (key, vars) => {
+    const dictionary = {
+      disk: '磁盘',
+      'disk.free': '剩 {size}',
+    }
+    const raw = dictionary[key] ?? key
+    if (vars === undefined) return raw
+    return raw.replace(/\{(\w+)\}/gu, (whole, name) => (
+      Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : whole
+    ))
+  }
+  const card = diskCard({ disk: { mounts }, t })
 
   const rows = collect(card, 'ssc-mount')
   assert.equal(rows.length, 3, 'every real filesystem gets a row, not only the first')
   assert.deepEqual(rows.map((row) => diskText(row).replace(/\s+/gu, ' ').trim()),
-    ['/home 99% 90T / 91T', '/ 41% 38G / 98G', '/data 35% 1.2T / 3.5T'],
-    'each row carries its mount, its percentage and its own figures')
+    ['/home 99% 90T / 91T · 剩 1.1T', '/ 41% 38G / 98G · 剩 55G', '/data 35% 1.2T / 3.5T · 剩 2.3T'],
+    'each row carries its mount, its percentage, its figures and what is left')
+
+  // The free figure is the one that answers "will my job fit": on a 91T volume the
+  // difference between 1.1T and 23G decides it, and a percentage cannot say it.
+  const freeTexts = collect(card, 'ssc-mount-free').map((node) => diskText(node).trim())
+  assert.deepEqual(freeTexts, ['· 剩 1.1T', '· 剩 55G', '· 剩 2.3T'],
+    'the remaining space is on the row, not only in the tooltip')
+
+  // A mount whose available figure is missing must not render "剩 undefined".
+  const noFree = diskCard({
+    disk: { mounts: [{ filesystem: '/dev/x', size: '1G', used: '1G', usedPercent: 100, mount: '/x' }] },
+    t,
+  })
+  assert.ok(!diskText(noFree).includes('剩'), 'a missing free figure renders nothing at all')
+
   assert.equal(rows[0].props.title, '/dev/sda1 · 90T / 91T · 1.1T free',
     'the row tooltip carries the device and the raw figures')
 
@@ -1163,6 +1188,58 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
     assert.ok(css.includes(rule), `the stylesheet carries ${rule}`)
   }
 
+  /* ------------------------------------------- the three load averages, labelled */
+
+  // The regression: the card printed `/proc/loadavg`'s three numbers joined by
+  // spaces. On the 512-core host that is `304.30 332.02 387.70` — which reads as a
+  // catastrophe and is 0.59 per core on an idle machine. The numbers mean nothing
+  // without the windows they cover and the core count they divide by, so both are
+  // on the card now, and the function is executed rather than pattern-matched.
+  const loadT = (key, vars) => {
+    const dictionary = {
+      load: '负载',
+      'load.window': '1m · 5m · 15m',
+      'load.perCore': '{value}/核',
+    }
+    const raw = dictionary[key] ?? key
+    if (vars === undefined) return raw
+    return raw.replace(/\{(\w+)\}/gu, (whole, name) => (
+      Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : whole
+    ))
+  }
+  const formatLoad = new Function(`${blockOf(source, 'formatLoad')}\nreturn formatLoad`)()
+
+  const heavy = formatLoad([304.3, 332.02, 387.7], 512, loadT)
+  assert.equal(heavy.value, '304.3  332.0  387.7', 'the three averages, readable at this size')
+  assert.equal(heavy.sub, '1m · 5m · 15m · 0.59/核',
+    'and the window labels plus the per-core figure that makes them interpretable')
+
+  const light = formatLoad([0.4, 0.5, 0.6], 4, loadT)
+  assert.equal(light.sub, '1m · 5m · 15m · 0.10/核',
+    'the same shape on a small host, where the per-core figure is what tells them apart')
+
+  // Below ten the hundredths matter (0.04 vs 0.09 per core); above it they are noise.
+  assert.equal(formatLoad([1.234, 2, 3], 8, loadT).value, '1.23  2.00  3.00')
+  assert.equal(formatLoad([12.34, 20, 30], 8, loadT).value, '12.3  20.0  30.0')
+
+  // No core count from the probe: show the windows and nothing invented.
+  assert.equal(formatLoad([1, 2, 3], undefined, loadT).sub, '1m · 5m · 15m',
+    'no per-core figure is invented when the probe did not report cores')
+  assert.equal(formatLoad([1, 2, 3], 0, loadT).sub, '1m · 5m · 15m',
+    'and a zero core count is refused rather than divided by')
+  assert.deepEqual(formatLoad(undefined, 8, loadT), { value: '—', sub: '1m · 5m · 15m' },
+    'a snapshot with no load reads as a dash')
+
+  // The card calls it, and the bar tracks the 1-minute average per core — the raw
+  // number on a 512-core host would paint a full red bar while the host is idle.
+  assert.ok(/const loadLine = formatLoad\(snapshot\?\.cpu\?\.load, snapshot\?\.cpu\?\.cores, t\)/u.test(overview),
+    'the load card runs the shipped formatter')
+  assert.ok(/snapshot\.cpu\.load\[0\] \/ snapshot\.cpu\.cores/u.test(overview),
+    'the bar is the one-minute average divided by the core count')
+
+  // Uptime moved to the host header, so it is not silently dropped.
+  assert.ok(overview.includes("t('uptime')") && overview.includes('formatDuration(snapshot.uptimeSeconds'),
+    'uptime still appears, now in the host header')
   // A backtick inside the stylesheet's template literal closes it early. The
   // result still parses — the CSS constant becomes two strings divided by each
   // other — so `node --check` passes and every rule silently disappears. This has

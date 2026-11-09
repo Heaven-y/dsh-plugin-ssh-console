@@ -494,7 +494,10 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       'cpu.cores': '{count} 核',
       'memory': '内存',
       'load': '负载',
+      'load.window': '1m · 5m · 15m',
+      'load.perCore': '{value}/核',
       'disk': '磁盘',
+      'disk.free': '剩 {size}',
       'uptime': '已运行',
       'gpu': 'GPU',
       'gpu.none': '未检测到 NVIDIA GPU',
@@ -606,7 +609,10 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       'cpu.cores': '{count} cores',
       'memory': 'Memory',
       'load': 'Load',
+      'load.window': '1m · 5m · 15m',
+      'load.perCore': '{value}/core',
       'disk': 'Disk',
+      'disk.free': '{size} free',
       'uptime': 'Uptime',
       'gpu': 'GPU',
       'gpu.none': 'No NVIDIA GPU detected',
@@ -725,6 +731,40 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       const hours = Math.floor(minutes / 60)
       if (hours < 24) return `${hours}h ${minutes % 60}m`
       return `${Math.floor(hours / 24)}d ${hours % 24}h`
+    }
+
+    /**
+     * The three load averages, as one readable line.
+     *
+     * `/proc/loadavg` is three bare numbers — 1, 5 and 15 minutes — and the card
+     * used to print them joined by spaces. On a 512-core host `304.30 332.02
+     * 387.70` reads as an emergency; it is 0.59 per core and the machine is idle.
+     * The same three numbers on four cores mean the opposite. So the per-core value
+     * is what makes them interpretable, and the window labels are what make them
+     * distinguishable — without either, the number is decoration.
+     *
+     * Two decimals below 10 and one above keeps the line short while staying
+     * precise enough to compare against the core count; a host at 304 does not need
+     * hundredths.
+     * @param load - the three averages, oldest first as `/proc/loadavg` reports.
+     * @param cores - the core count, or undefined when the probe did not read it.
+     * @param t - the locale lookup.
+     * @returns the headline value and the line underneath it.
+     */
+    function formatLoad(load, cores, t) {
+      const values = (Array.isArray(load) ? load : [])
+        .filter((value) => typeof value === 'number' && Number.isFinite(value))
+      if (values.length === 0) return { value: '—', sub: t('load.window') }
+      const shown = values.map((value) => (value >= 10 ? value.toFixed(1) : value.toFixed(2)))
+      const perCore = typeof cores === 'number' && Number.isFinite(cores) && cores > 0
+        ? t('load.perCore', { value: (values[0] / cores).toFixed(2) })
+        : undefined
+      return {
+        value: shown.join('  '),
+        // The windows are what the three numbers are; the per-core figure is what
+        // they mean. Both belong on the card, and neither belongs in a tooltip.
+        sub: perCore === undefined ? t('load.window') : `${t('load.window')} · ${perCore}`,
+      }
     }
 
     /**
@@ -880,7 +920,16 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
               className: toneClass(entry.usedPercent),
               style: { width: `${Math.max(0, Math.min(100, entry.usedPercent))}%` },
             })),
-          h('span', { className: 'ssc-mount-figures' }, `${entry.used} / ${entry.size}`)))))
+          // Both figures, because they answer different questions. "90T / 91T" is
+          // how full it is; "剩 1.4T" is how much more can be written, which is what
+          // someone about to launch a training run actually needs. On a 91T volume
+          // the difference between 1.4T and 23G decides whether the job fits, and a
+          // percentage cannot express that.
+          h('span', { className: 'ssc-mount-figures' },
+            `${entry.used} / ${entry.size}`,
+            entry.available === undefined || entry.available === ''
+              ? null
+              : h('span', { className: 'ssc-mount-free' }, ` · ${t('disk.free', { size: entry.available })}`))))))
     }
 
     /**
@@ -933,6 +982,7 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       const memoryPercent = memory.totalBytes > 0 ? (memory.usedBytes / memory.totalBytes) * 100 : undefined
       const gpus = snapshot?.gpu?.devices ?? []
       const gpuMemory = gpus.reduce((sum, device) => sum + (device.memoryUsedMiB ?? 0), 0)
+      const loadLine = formatLoad(snapshot?.cpu?.load, snapshot?.cpu?.cores, t)
       return h('section', { className: 'ssc-host' },
         h('div', { className: 'ssc-host-head' },
           h('h3', { className: 'ssc-host-name' }, session.hostname ?? server.host ?? ''),
@@ -940,6 +990,13 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
             [
               snapshot?.os ?? session.os,
               endpointOf(server),
+              // Uptime lives here rather than under the load card: that card now
+              // spends its second line on the load windows and the per-core figure,
+              // which is what makes the three numbers mean anything. Uptime is
+              // context about the machine, so it belongs with the other context.
+              snapshot?.uptimeSeconds === undefined
+                ? null
+                : `${t('uptime')} ${formatDuration(snapshot.uptimeSeconds * 1000)}`,
               typeof session.since === 'number' ? t('since', { duration: formatDuration(Date.now() - session.since) }) : null,
             ].filter(Boolean).join(' · ')),
           // Cached numbers are shown straight away but labelled, so a reopened
@@ -971,10 +1028,16 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
               }),
               h(StatCard, {
                 label: t('load'),
-                value: (snapshot.cpu?.load ?? []).map((value) => value.toFixed(2)).join('  '),
-                sub: snapshot.uptimeSeconds === undefined
-                  ? undefined
-                  : `${t('uptime')} ${formatDuration(snapshot.uptimeSeconds * 1000)}`,
+                value: loadLine.value,
+                sub: loadLine.sub,
+                // The bar tracks the 1-minute average against the core count: at or
+                // over 1.0 per core every core has work waiting. A host with more
+                // cores is not "busier" for the same raw load, which is why the raw
+                // number alone was misleading.
+                percent: typeof snapshot.cpu?.cores === 'number' && snapshot.cpu.cores > 0
+                  && typeof snapshot.cpu?.load?.[0] === 'number'
+                  ? (snapshot.cpu.load[0] / snapshot.cpu.cores) * 100
+                  : undefined,
               })),
             h('div', { className: 'ssc-cards ssc-cards-disk' },
               h(DiskCard, { disk: snapshot.disk, t })),
