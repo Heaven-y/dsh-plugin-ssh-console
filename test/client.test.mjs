@@ -270,6 +270,7 @@ const required = [
   'connect.server', 'connect.password', 'connect.add', 'state.connected', 'state.idle',
   'tab.overview', 'tab.processes', 'tab.files', 'tab.terminal',
   'cpu', 'memory', 'load', 'disk', 'gpu', 'processes', 'gpu.util', 'gpu.memory',
+  'load.window', 'load.perCore', 'load.hint', 'disk.free',
   'col.pid', 'col.user', 'col.cpu', 'col.mem', 'col.rss', 'col.threads', 'col.elapsed', 'col.command',
   'files.up', 'files.refresh', 'files.loading',
   'terminal.title', 'terminal.close', 'terminal.exited', 'terminal.opening', 'terminal.cols',
@@ -1240,6 +1241,47 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   // Uptime moved to the host header, so it is not silently dropped.
   assert.ok(overview.includes("t('uptime')") && overview.includes('formatDuration(snapshot.uptimeSeconds'),
     'uptime still appears, now in the host header')
+
+  /* --------------------------------------- the load card explains itself on hover */
+
+  // The three numbers are the least self-explanatory figure on the page: `304.30`
+  // looks alarming until it is divided by 512 cores. The card carries a tooltip
+  // saying so, and the tooltip is on the card rather than on the digits so hovering
+  // anywhere works.
+  {
+    const statCard = new Function(
+      'h',
+      `${blockOf(source, 'StatCard')}\nreturn StatCard`,
+    )(fakeElement)
+
+    const withHint = statCard({ label: '负载', value: '1', sub: 's', hint: '三个数是 1/5/15 分钟' })
+    assert.equal(withHint.props.title, '三个数是 1/5/15 分钟',
+      'the hint becomes the card tooltip')
+
+    // The other cards pass no hint and must not gain an empty tooltip: a title of
+    // "" still makes the browser show a (blank) tooltip box.
+    const withoutHint = statCard({ label: 'CPU', value: '1', sub: 's' })
+    assert.equal(withoutHint.props.title, undefined,
+      'a card without a hint carries no title attribute at all')
+
+    assert.ok(/hint: t\('load\.hint'\)/u.test(overview), 'the load card passes its hint')
+    assert.equal((overview.match(/hint:/gu) ?? []).length, 1,
+      'and it is the only card that does — the others are self-explanatory')
+
+    // The dictionary entries are required by the locale check above; here the
+    // content is checked, because a tooltip that says nothing useful is worse than
+    // none: it has to cover what the numbers are, the per-core division, and how
+    // to read them.
+    for (const localeId of ['zh', 'en']) {
+      const hint = dictionaries[0].dicts[localeId]['load.hint']
+      assert.ok(hint.length > 80, `${localeId}.load.hint says something substantial`)
+      for (const idea of ['1', '5', '15']) {
+        assert.ok(hint.includes(idea), `${localeId}.load.hint names the ${idea} minute window`)
+      }
+      assert.ok(/core|核/u.test(hint), `${localeId}.load.hint mentions the core count`)
+    }
+  }
+
   // A backtick inside the stylesheet's template literal closes it early. The
   // result still parses — the CSS constant becomes two strings divided by each
   // other — so `node --check` passes and every rule silently disappears. This has

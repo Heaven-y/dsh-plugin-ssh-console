@@ -496,6 +496,11 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       'load': '负载',
       'load.window': '1m · 5m · 15m',
       'load.perCore': '{value}/核',
+      'load.hint': '最近 1 / 5 / 15 分钟的平均负载：平均有多少个进程在排队等 CPU 或磁盘。\n'
+        + '要除以核数才有意义——同样的 300 在 512 核上是 0.59/核（还有富余），在 4 核上是 75/核（排队严重）。\n'
+        + '低于 1.0/核 不排队；接近 1.0/核 刚好满载；高于 1.0/核 有进程在等。\n'
+        + '三个数递减说明正在变闲，递增说明负载在爬升。\n'
+        + '若 CPU 很低而负载很高，通常是有进程卡在磁盘 I/O。',
       'disk': '磁盘',
       'disk.free': '剩 {size}',
       'uptime': '已运行',
@@ -611,6 +616,14 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
       'load': 'Load',
       'load.window': '1m · 5m · 15m',
       'load.perCore': '{value}/core',
+      'load.hint': 'Average load over the last 1 / 5 / 15 minutes: how many processes are '
+        + 'waiting for CPU or disk on average.\n'
+        + 'It only means something divided by the core count — 300 is 0.59/core on 512 cores '
+        + '(plenty spare) and 75/core on 4 cores (badly queued).\n'
+        + 'Below 1.0/core nothing waits; near 1.0/core it is saturated; above 1.0/core '
+        + 'processes are queueing.\n'
+        + 'Falling numbers mean the host is settling down, rising ones that load is building.\n'
+        + 'Low CPU with high load usually means processes are stuck on disk I/O.',
       'disk': 'Disk',
       'disk.free': '{size} free',
       'uptime': 'Uptime',
@@ -862,12 +875,17 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
     }
 
     /**
-     * One labelled statistic with an optional bar.
-     * @param props - label, value, sub text, percentage.
+     * One labelled statistic with an optional bar and an optional explanation.
+     *
+     * `hint` becomes the card's tooltip. It is for figures whose meaning is not
+     * self-evident — the three load averages being the case that prompted it — and
+     * it is set on the card rather than on the number so hovering anywhere on it
+     * works, not just the two characters of a digit.
+     * @param props - label, value, sub text, percentage, tooltip text.
      * @returns the card.
      */
-    function StatCard({ label, value, sub, percent }) {
-      return h('div', { className: 'ssc-card' },
+    function StatCard({ label, value, sub, percent, hint }) {
+      return h('div', { className: 'ssc-card', title: hint },
         h('span', { className: 'ssc-card-label' }, label),
         h('span', { className: 'ssc-card-value' }, value),
         typeof percent === 'number' && Number.isFinite(percent)
@@ -1030,6 +1048,10 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
                 label: t('load'),
                 value: loadLine.value,
                 sub: loadLine.sub,
+                // The three numbers are the least self-explanatory figure on the
+                // page, so the card explains itself on hover rather than assuming
+                // the reader knows what `/proc/loadavg` prints.
+                hint: t('load.hint'),
                 // The bar tracks the 1-minute average against the core count: at or
                 // over 1.0 per core every core has work waiting. A host with more
                 // cores is not "busier" for the same raw load, which is why the raw
