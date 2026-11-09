@@ -155,15 +155,16 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
 .ssc-card-label{color:var(--dsw-alias-label-secondary);font-size:11px;letter-spacing:.04em;text-transform:uppercase}
 .ssc-card-value{font-size:19px;line-height:25px;font-weight:600;font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ssc-card-sub{color:var(--dsw-alias-label-secondary);font-size:11px;font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* One row per real filesystem, each with its own bar. A host often has a small
+/* One block per real filesystem, each with its own bar. A host often has a small
    root volume plus a data volume somewhere else, and which one matters differs by
    machine — so every mount is shown, and none is promoted to a headline.
-   The card spans the whole row and lays its mounts out in columns: left in the
-   180px grid cell a four-mount host made the card 226px tall, which stretched the
-   three single-figure cards beside it to match and left 125px of dead space in
-   each. Across the full row the same four mounts fit in 85px. */
-.ssc-card-disk{grid-column:1/-1}
-.ssc-card-disk .ssc-mounts{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
+   The disk card sits on a row of its own (ssc-cards-disk) and its mounts share
+   that row evenly. It cannot live in the stat grid above: a child spanning every
+   column stops auto-fit from collapsing empty tracks, so a 1920px row became ten
+   183px tracks, the three stat cards each took one and truncated their values,
+   and the disk card took all ten. */
+.ssc-cards-disk{grid-template-columns:1fr}
+.ssc-card-disk .ssc-mounts{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px 18px}
 .ssc-mounts{display:flex;flex-direction:column;gap:8px;min-width:0}
 .ssc-mount{display:flex;flex-direction:column;gap:3px;min-width:0}
 .ssc-mount-head{display:flex;align-items:baseline;gap:8px;min-width:0}
@@ -848,15 +849,15 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
      * is the one that grows, on the next it is `/home`, and no rule picks right
      * for both.
      *
-     * So there is no headline. Each mount gets a row with its own bar and its own
-     * figures, and the rows are ordered fullest-first because that is the order a
+     * So there is no headline. Each mount gets a block with its own bar and its own
+     * figures, and the blocks are ordered fullest-first because that is the order a
      * reader scans in.
      *
-     * The card spans the full grid row (`ssc-card-disk`) rather than sitting in one
-     * 180px cell. Measured with a real four-mount host: inside a cell the card was
-     * 226px tall and stretched the three single-figure cards beside it to the same
-     * height, leaving 125px of dead space in each; across the row the mounts lay
-     * out in four columns and the card is 85px.
+     * The card renders inside `ssc-cards-disk`, a grid row of its own, and its
+     * mounts share that row evenly. It must not be a `grid-column: 1/-1` child of
+     * the stat grid: a spanning child stops `auto-fit` from collapsing empty
+     * tracks, which turned a 1920px row into ten 183px tracks and truncated the
+     * stat values — that is the layout that shipped broken and had to be redone.
      * @param props - the disk snapshot and the locale lookup.
      * @returns the card.
      */
@@ -949,6 +950,12 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
           : failed
             ? h('div', { className: 'ssc-hint ssc-fail' }, `${t('poll.failed')}: ${snapshot.error}`)
             : h(React.Fragment, null,
+            // The three single-figure cards share one grid and nothing spans it, so
+            // `auto-fit` collapses the tracks it does not need and they fill the
+            // width. The disk card gets a row of its own underneath: as a spanning
+            // child of this grid it stopped the collapse, and a 1920px row became
+            // ten 183px tracks — the three cards each took one and truncated their
+            // values while the disk card took all ten.
             h('div', { className: 'ssc-cards' },
               h(StatCard, {
                 label: t('cpu'),
@@ -968,7 +975,8 @@ select.ssc-control{appearance:none;padding-right:26px;cursor:pointer;background-
                 sub: snapshot.uptimeSeconds === undefined
                   ? undefined
                   : `${t('uptime')} ${formatDuration(snapshot.uptimeSeconds * 1000)}`,
-              }),
+              })),
+            h('div', { className: 'ssc-cards ssc-cards-disk' },
               h(DiskCard, { disk: snapshot.disk, t })),
             h('div', { className: 'ssc-section' },
               h('div', { className: 'ssc-section-head' },

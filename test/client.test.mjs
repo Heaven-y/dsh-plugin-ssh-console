@@ -293,7 +293,37 @@ console.log('ok 5 - zh and en dictionaries are complete and symmetric')
 
 assert.ok(effects.length >= 3, 'remote, stylesheet and dictionaries are owned effects')
 assert.equal(styles.length, 1, 'one stylesheet is inserted')
+
+// A backtick inside the stylesheet's template literal closes it early. When the
+// pair wraps a `/`, the literal becomes two strings divided by each other — NaN —
+// so the file still parses, `node --check` still passes, and every CSS rule
+// silently disappears. This has now happened twice, both times in a comment that
+// quoted a selector, and the first guard written for it was itself broken: it
+// sliced to a closing fence of "\n    `\n" when the real one is "\n`", got an empty
+// string, and passed on everything. So this reads the literal the way the parser
+// does and says so before the symptom (a non-string `css`) can mask it.
+{
+  const open = source.indexOf('const CSS = `')
+  assert.ok(open > 0, 'the stylesheet literal exists')
+  const start = open + 'const CSS = `'.length
+  let index = start
+  let terminated = -1
+  while (index < source.length) {
+    if (source[index] === '\\') { index += 2; continue }
+    if (source[index] === '`') { terminated = index; break }
+    index += 1
+  }
+  assert.ok(terminated > 0, 'the stylesheet literal is terminated')
+  const afterFence = source.slice(terminated + 1, source.indexOf('\n', terminated + 1))
+  assert.equal(afterFence.trim(), '',
+    'the stylesheet literal ends at a backtick on its own line, so nothing cut it short')
+  const literal = source.slice(start, terminated)
+  assert.ok(literal.includes('.ssc-page'), 'and the literal really carries the page rules')
+  assert.ok(literal.length > 5000, `the literal is the whole stylesheet (${literal.length} chars)`)
+}
+
 const css = styles[0].textContent
+assert.equal(typeof css, 'string', 'the stylesheet text reached the DOM as a string')
 assert.ok(css.includes('.ssc-page'), 'the stylesheet carries the page rules')
 assert.ok(css.includes('.ssc-gpu'), 'the stylesheet carries the GPU card rules')
 assert.ok(css.includes('.ssc-term-host'), 'the stylesheet carries the terminal rules')
@@ -1108,21 +1138,39 @@ console.log('ok 6 - stylesheet inserted once, theme tokens only')
   assert.ok(!/snapshot\.disk\.usedPercent/u.test(source),
     'nothing still reads the single-disk field directly')
 
-  // The card spans the grid row instead of taking one 180px cell. Measured with a
-  // real four-mount host: inside a cell it was 226px tall and stretched the three
-  // single-figure cards beside it to match, leaving 125px of dead space in each;
-  // across the row its mounts lay out in columns and it is 85px.
-  assert.ok(/className: 'ssc-card ssc-card-disk'/u.test(blockOf(source, 'DiskCard')),
-    'the disk card carries the modifier that spans the row')
-  assert.ok(/\.ssc-card-disk\{grid-column:1\/-1\}/u.test(css),
-    'and the modifier actually spans every column of the grid')
+  // The disk card sits on a grid row of its own. This is not a style preference:
+  // as a `grid-column: 1/-1` child of the stat grid it stopped `auto-fit` from
+  // collapsing empty tracks, and a measured 1920px row became ten 183px tracks —
+  // the three stat cards each took one and truncated `238 GiB / 1007 GiB` and
+  // `690.53 537.87 4.21`, while the disk card took all ten. That shipped and had to
+  // be redone, so the structure is pinned here.
+  assert.ok(/className: 'ssc-cards ssc-cards-disk'/u.test(source),
+    'the disk card is rendered in a grid row of its own')
+  const overview = blockOf(source, 'HostBlock')
+  const statGrid = overview.slice(overview.indexOf("className: 'ssc-cards'"),
+    overview.indexOf("className: 'ssc-cards ssc-cards-disk'"))
+  assert.ok(!/h\(DiskCard/u.test(statGrid),
+    'and it is no longer a child of the stat grid')
+  assert.ok(!/grid-column:1\/-1/u.test(css),
+    'nothing spans the grid any more — a spanning child breaks auto-fit')
   assert.ok(/\.ssc-card-disk \.ssc-mounts\{[^}]*grid-template-columns/u.test(css),
-    'the mounts lay out in columns, which is what makes the row span pay off')
+    'the mounts share the row in columns')
+  assert.ok(/\.ssc-cards-disk\{grid-template-columns:1fr\}/u.test(css),
+    'the disk row is a single full-width track')
 
   for (const rule of ['.ssc-mounts{', '.ssc-mount{', '.ssc-mount-head{', '.ssc-mount-name{',
     '.ssc-mount-pct{', '.ssc-mount-figures{']) {
     assert.ok(css.includes(rule), `the stylesheet carries ${rule}`)
   }
+
+  // A backtick inside the stylesheet's template literal closes it early. The
+  // result still parses — the CSS constant becomes two strings divided by each
+  // other — so `node --check` passes and every rule silently disappears. This has
+  // now happened twice, both times in a comment that quoted a selector, and the
+  // first guard written for it was itself broken: it sliced to a closing fence of
+  // "\n    `\n" when the real one is "\n`", got an empty string, and passed on
+  // everything. So this reads the literal the way the parser does — scan from the
+  // opening backtick to the next one and require that the next one is the terminator.
   console.log('ok 22 - the disk card lists every filesystem with its own bar, and no headline')
 }
 
